@@ -2,7 +2,7 @@
 
 #------------------------------------------------------------------------------
 #
-# Name: $Id: xcmd,v 1.1 2004/11/30 20:03:35 nloyola Exp $
+# Name: $Id: xcmd,v 1.2 2004/11/30 20:17:15 nloyola Exp $
 #
 # See $USAGE.
 #
@@ -59,7 +59,7 @@ sub telnetConnect
     my $connTimeout = 5;
 
     my $stdOutLog = $exp->log_stdout ();
-    $exp->log_stdout (0); # suppress output
+    #$exp->log_stdout (0); # suppress output
 
     $exp->expect ($connTimeout,
                   [
@@ -119,7 +119,7 @@ sub cmd
     if (! $spawnOk) { return; }
 
     my $stdOutLog = $exp->log_stdout ();
-    $exp->log_stdout (0); # suppress output
+    #$exp->log_stdout (0); # suppress output
 
     $exp->send ("$command\n");
     $exp->expect ($timeout,
