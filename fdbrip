@@ -10,7 +10,7 @@ use Getopt::Std;
 use CDDB;
 
 my $HELP_STR = <<HELP_END;
-Usage: $0 [OPTIONS] GENRE CDID
+Usage: $0 [OPTIONS] GENRE CDID LAME_GENRE YEAR
 
   Converts WAV files to MP3 with ID3 tags from freedb.org. CD has to be
   converted to an image using Clone CD, then coverted to WAV files using
@@ -46,6 +46,11 @@ foreach (@op)
     {
         $fnameFormat = 'cdmage';
     }
+
+    if ($_ =~ /track_\d+.wav/)
+    {
+        $fnameFormat = 'grip';
+    }
 }
 
 if (! defined ($fnameFormat))
@@ -72,6 +77,11 @@ my $cddbp = new CDDB( Host  => 'freedb.freedb.org', # default
 
 ### Query disc details (usually done with get_discs() information).
 my $disc = $cddbp->get_disc_details($fdbgenre, $cddbp_id);
+
+if (! defined ($disc))
+{
+    die "freedb info does not exist\n";
+}
 
 my $artist;
 my $title;
@@ -186,5 +196,9 @@ sub baseFnameGet
     elsif ($fnameFormat eq 'cdmage')
     {
         return sprintf ("image-track-%02d-AUDIO-2352", $trackNum);
+    }
+    elsif ($fnameFormat eq 'grip')
+    {
+        return sprintf ("track_%02d", $trackNum);
     }
 }
