@@ -10,6 +10,12 @@ my %pop3server =
       'pwd'  => 'nelxrs24'
      },
 
+     'pop.gmail.com' =>
+     {
+      'user' => 'nloyola@gmail.com',
+      'pwd'  => 'aztec24'
+     },
+
      'shawmail.ed.shawcable.net' =>
      {
       'user' => 'nloyola',
@@ -27,7 +33,8 @@ sub accountCheck
 
     my $pop = new Mail::POP3Client (USER     => $user,
                                     PASSWORD => $pwd,
-                                    HOST     => $server);
+                                    HOST     => $server,
+                                    DEBUG => 1);
 
     print $pop->Count() . " message(s) on " . $server . "\n";
 
