@@ -1,0 +1,9 @@
+#!/usr/bin/bash
+
+if [ ! -d $P4DIR/proj/swae/vxImage_me_pc ]; then
+   echo "cannot find vxsim directory"
+   exit 1
+fi
+
+cd $P4DIR/proj/swae/vxImage_me_pc
+./vxWorks.exe -r 8000000 &
