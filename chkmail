@@ -1,16 +1,21 @@
 #!/home/sw/bin/perl -w
 
 use Mail::POP3Client;
-my %pop3server;
 
-$pop3server {'dido'} {'user'} = 'nloyola';
-$pop3server {'dido'} {'pwd'} = '24nelxrs';
+my %pop3server =
+    (
+     'dido' =>
+     {
+      'user' => 'nloyola',
+      'pwd'  => 'nelxrs24'
+     },
 
-#$pop3server {'pop.mail.yahoo.com'} {'user'} = 'nloyola';
-#$pop3server {'pop.mail.yahoo.com'} {'pwd'} = '';
-
-$pop3server {'shawmail.ed.shawcable.net'} {'user'} = 'nloyola';
-$pop3server {'shawmail.ed.shawcable.net'} {'pwd'}  = 'nelxrs24';
+     'shawmail.ed.shawcable.net' =>
+     {
+      'user' => 'nloyola',
+      'pwd'  => 'nelxrs24'
+     }
+     );
 
 sub accountCheck
 {
@@ -47,7 +52,7 @@ sub accountsCheckAll
     }
 }
 
-if ($#ARGV == -1)
+if ($#ARGV < 0)
 {
     accountsCheckAll ();
     exit;

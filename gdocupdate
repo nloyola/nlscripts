@@ -1,0 +1,98 @@
+#!/usr/local/bin/perl -w
+
+use strict;
+use Getopt::Long;
+
+my $HELP_STR = <<HELP_STR_END;
+Usage: $0 [-d] | DOCNAME1 DOCNAME2 ... DOXNAMEx
+
+  Script to download PDF documents from Galazar machine named chronus.
+HELP_STR_END
+
+my %doc2dir =
+    (
+     'AstraDS'           => 'projects/astra/specdocs/designspecs/',
+     'DS_MDX251'         => 'projects/astra/specdocs/designspecs/',
+     'VenusDS'           => 'projects/venus/specdocs/designspecs/',
+     'DS_DSF251'         => 'projects/venus/specdocs/designspecs/',
+     'MercuryDS.pdf'     => 'projects/mercury/specdocs/designspecs/',
+     'MEA-DS-1000100-18' => ''
+    );
+
+my %docalias =
+    (
+     'msf250' => 'MEA-DS-1000100-18',
+     'venus'  => 'VenusDS'
+    );
+
+my $doclist = 0;
+
+
+sub docGet
+{
+    my $docname = shift;
+
+    if (defined ($docalias {$docname}))
+    {
+        $docname = $docalias {$docname};
+    }
+
+    if (! defined ($doc2dir {$docname}))
+    {
+        die "dir for ", $docname, " not defined\n";
+    }
+
+    `rm -rf $docname.pdf*`;
+    my $fname = $doc2dir{$docname} . $docname . ".pdf";
+
+    `curl -n -O ftp://cronus/$fname 2>/dev/null`;
+    my $rc = ($? >> 8);
+    if ($rc == 19)
+    {
+        # try to download a gzipped version
+        `curl -n -O ftp://cronus/$fname.gz 2>/dev/null`;
+        $rc = ($? >> 8);
+        if ($rc == 19)
+        {
+            print "file ", $fname, " does not exist\n";
+        }
+        else
+        {
+            `gzip -d $docname.pdf.gz`;
+        }
+    }
+}
+
+if ($#ARGV < 0)
+{
+    die $HELP_STR . "\n";
+}
+
+if (!GetOptions ('doclist' => \$doclist))
+{
+    die "ERROR: bad options in command line\n" . "$HELP_STR\n";
+}
+
+if ($doclist)
+{
+    print "available documents are:\n";
+    foreach (keys %doc2dir)
+    {
+        print "  ", $_, "\n";
+    }
+
+    print "\naliases:\n";
+    foreach (keys %docalias)
+    {
+        print "  ", $_, " (", $docalias {$_}, ")\n";
+    }
+    exit;
+}
+
+for my $docname (@ARGV)
+{
+    #print "downloading: ", $docname, "\n";
+    docGet ($docname);
+}
+
+1;
