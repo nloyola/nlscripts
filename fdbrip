@@ -1,5 +1,11 @@
 #!/usr/local/bin/perl -w
 
+#------------------------------------------------------------------------------
+#
+# To normalize WAV tracks use: normalize -vb TRACKS
+#
+#------------------------------------------------------------------------------
+
 use Getopt::Std;
 use CDDB;
 
@@ -30,15 +36,20 @@ my $op = `ls`;
 my @op = split ('\n', $op);
 foreach (@op)
 {
-    if ($_ =~ /Unknown Artist - Unknown Title - 01 - Track01.wav/)
+    if ($_ =~ /Unknown Artist - Unknown Title - \d+ - Track\d+.wav/)
     {
         $fnameFormat = 'eac';
     }
 
-    if ($_ =~ /IMAGE track 01 AUDIO-2352.wav/)
+    if ($_ =~ /IMAGE track \d+ AUDIO-2352.wav/)
     {
         $fnameFormat = 'cdmage';
     }
+}
+
+if ($fnameFormat eq "")
+{
+    die "ERROR: cannot find WAV files.s\n";
 }
 
 my $fdbgenre = $ARGV [0];
@@ -66,25 +77,29 @@ my $title;
 
 ($artist, $title) = split ("\\s+/\\s+", $disc->{dtitle} );
 
+# sometimes freedb.org uses the '/' character in CD data
+$artist =~ s|/|-|g;
+$title =~ s|/|-|g;
+
 if (defined $option {'s'})
 {
     discInfoShow ($disc);
     exit;
 }
 
-my $lame_opts = "-b 192 -h --add-id3v2";
+my $lame_opts = "-b 192 -q 0 --add-id3v2";
 
 my $id3tags_static = "--ta \"$artist\" --tl \"$title\"";
 
 if (defined $genre)
-  {
-      $id3tags_static .= " --tg \"" . $genre ."\"";
-  }
+{
+    $id3tags_static .= " --tg \"" . $genre ."\"";
+}
 
 if (defined $year)
-  {
-      $id3tags_static .= " --ty \"" . $year ."\"";
-  }
+{
+    $id3tags_static .= " --ty \"" . $year ."\"";
+}
 
 my @track_titles  = @{$disc->{'ttitles'}};
 my $tnum;
@@ -94,24 +109,25 @@ foreach $tname (@track_titles)
   {
       $tnum = sprintf ("%02d", $i);
 
-      $tname =~ s/\//-/g;
+      my $wavFname = baseFnameGet ($i) . ".wav";
+      my $mp3Fname = $artist . " - " . $title . " - ". $tnum . " - "
+                     . $tname . ".mp3";
 
-      my $fname = baseFnameGet ($tnum);
+      if (! (-e $wavFname)) { next; }
+      if (-e $mp3Fname) { next; }
 
       if ($option{'d'})
       {
           print "lame $lame_opts $id3tags_static "
                 . " --tn \"$tnum\" --tt \"$tname\" "
-                . "\"" . $fname . ".wav\" "
-                . " \"$artist - $title - $tnum - $tname.mp3\"\n";
+                . "\"" . $wavFname . "\" \"" . $mp3Fname . "\"\n";
       }
 
       if (!$option{'d'})
       {
           system ("lame $lame_opts $id3tags_static "
                   . " --tn \"$tnum\" --tt \"$tname\" "
-                  . "\"" . $fname . ".wav\" "
-                  . " \"$artist - $title - $tnum - $tname.mp3\"");
+                . "\"" . $wavFname . "\" \"" . $mp3Fname . "\"");
       }
 
       $i++;
