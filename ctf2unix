@@ -1,0 +1,13 @@
+#!/usr/bin/bash
+
+if [ ! -d oam/ocdt ]; then
+   echo oam/octf directory not found
+   exit 1
+fi
+
+cd oam/ocdt
+find . -name \*.ctf -exec chmod 644 {} \;
+find . -name \*.ctf -exec dos2unix {} \;
+find . -name \*.ctf -exec chmod 444 {} \;
+
+exit 0
