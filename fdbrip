@@ -118,6 +118,7 @@ my $i = 1;
 
 foreach $tname (@track_titles)
   {
+      $tname =~ s/:/ -/g;
       $tnum = sprintf ("%02d", $i);
 
       my $wavFname = baseFnameGet ($i) . ".wav";

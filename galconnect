@@ -74,6 +74,7 @@ sub main
         if (/PPP adapter/)
         {
             $pppAdapterFound = 1;
+            $ethAdapterFound = 0;
         }
 
         if ($pppAdapterFound && (/Default Gateway[\s\.]+\s:\s([\d\.]+)/))
@@ -84,7 +85,7 @@ sub main
 
     if (defined ($option{g}))
     {
-        $defaultGateway = $option {d};
+        $defaultGateway = $option {g};
     }
 
     if (defined ($vpnGateway))
