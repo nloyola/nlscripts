@@ -33,8 +33,8 @@ sub accountCheck
 
     my $pop = new Mail::POP3Client (USER     => $user,
                                     PASSWORD => $pwd,
-                                    HOST     => $server,
-                                    DEBUG => 1);
+                                    HOST     => $server);
+                                    #DEBUG => 1);
 
     print $pop->Count() . " message(s) on " . $server . "\n";
 
