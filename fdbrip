@@ -17,7 +17,29 @@ HELP_END
 
 my %option;
 
-getopts ('sh', \%option);
+getopts ('dgsh', \%option);
+
+if ($option{'g'})
+{
+    system ('lame --genre-list');
+    exit;
+}
+
+my $fnameFormat;
+my $op = `ls`;
+my @op = split ('\n', $op);
+foreach (@op)
+{
+    if ($_ =~ /Unknown Artist - Unknown Title - 01 - Track01.wav/)
+    {
+        $fnameFormat = 'eac';
+    }
+
+    if ($_ =~ /IMAGE track 01 AUDIO-2352.wav/)
+    {
+        $fnameFormat = 'cdmage';
+    }
+}
 
 my $fdbgenre = $ARGV [0];
 my $cddbp_id = $ARGV [1];
@@ -74,30 +96,26 @@ foreach $tname (@track_titles)
 
       $tname =~ s/\//-/g;
 
-      #print "lame $lame_opts $id3tags_static "
-      #      . " --tn \"$tnum\" --tt \"$tname\" "
-      #      . "\"IMAGE track $tnum AUDIO-2352.wav\" "
-      #      . " \"$artist - $title - $tnum - $tname.mp3\"\n";
+      my $fname = baseFnameGet ($tnum);
 
-      system ("lame $lame_opts $id3tags_static "
-              . " --tn \"$tnum\" --tt \"$tname\" "
-              . "\"IMAGE track $tnum AUDIO-2352.wav\" "
-              . " \"$artist - $title - $tnum - $tname.mp3\"");
+      if ($option{'d'})
+      {
+          print "lame $lame_opts $id3tags_static "
+                . " --tn \"$tnum\" --tt \"$tname\" "
+                . "\"" . $fname . ".wav\" "
+                . " \"$artist - $title - $tnum - $tname.mp3\"\n";
+      }
+
+      if (!$option{'d'})
+      {
+          system ("lame $lame_opts $id3tags_static "
+                  . " --tn \"$tnum\" --tt \"$tname\" "
+                  . "\"" . $fname . ".wav\" "
+                  . " \"$artist - $title - $tnum - $tname.mp3\"");
+      }
 
       $i++;
   }
-
-
-#lame -b 192 -h "IMAGE track 01 AUDIO-2352.wav" --ta "Al Gromer Khan" --ty 1998 --tl "Tantra Drums" --tn 1 --tg 10 --add-id3v2 --tt "Kublai Tec"    "Al Gromer Khan - Tantra Drums - 01 - Kublai Tec.mp3"
-#lame -b 192 -h "IMAGE track 02 AUDIO-2352.wav" --ta "Al Gromer Khan" --ty 1998 --tl "Tantra Drums" --tn 2 --tg 10 --add-id3v2 --tt "The Ritual"    "Al Gromer Khan - Tantra Drums - 02 - The Ritual.mp3"
-#lame -b 192 -h "IMAGE track 03 AUDIO-2352.wav" --ta "Al Gromer Khan" --ty 1998 --tl "Tantra Drums" --tn 3 --tg 10 --add-id3v2 --tt "Agori Dance"   "Al Gromer Khan - Tantra Drums - 03 - Agori Dance.mp3"
-#lame -b 192 -h "IMAGE track 04 AUDIO-2352.wav" --ta "Al Gromer Khan" --ty 1998 --tl "Tantra Drums" --tn 4 --tg 10 --add-id3v2 --tt "Moon Retros"   "Al Gromer Khan - Tantra Drums - 04 - Moon Retros.mp3"
-#lame -b 192 -h "IMAGE track 05 AUDIO-2352.wav" --ta "Al Gromer Khan" --ty 1998 --tl "Tantra Drums" --tn 5 --tg 10 --add-id3v2 --tt "Take This Ruby" "Al Gromer Khan - Tantra Drums - 05 - Take This Ruby.mp3"
-#lame -b 192 -h "IMAGE track 06 AUDIO-2352.wav" --ta "Al Gromer Khan" --ty 1998 --tl "Tantra Drums" --tn 6 --tg 10 --add-id3v2 --tt "Tantra Drums"  "Al Gromer Khan - Tantra Drums - 06 - Tantra Drums.mp3"
-#lame -b 192 -h "IMAGE track 07 AUDIO-2352.wav" --ta "Al Gromer Khan" --ty 1998 --tl "Tantra Drums" --tn 7 --tg 10 --add-id3v2 --tt "Kula"          "Al Gromer Khan - Tantra Drums - 07 - Kula.mp3"
-#lame -b 192 -h "IMAGE track 08 AUDIO-2352.wav" --ta "Al Gromer Khan" --ty 1998 --tl "Tantra Drums" --tn 8 --tg 10 --add-id3v2 --tt "Blue Raga"     "Al Gromer Khan - Tantra Drums - 08 - Blue Raga.mp3"
-#lame -b 192 -h "IMAGE track 09 AUDIO-2352.wav" --ta "Al Gromer Khan" --ty 1998 --tl "Tantra Drums" --tn 9 --tg 10 --add-id3v2 --tt "Conga Jog"     "Al Gromer Khan - Tantra Drums - 09 - Conga Jog.mp3"
-#lame -b 192 -h "IMAGE track 10 AUDIO-2352.wav" --ta "Al Gromer Khan" --ty 1998 --tl "Tantra Drums" --tn 10 --tg 10 --add-id3v2 --tt "Unmoved Mover" "Al Gromer Khan - Tantra Drums - 10 - Unmoved Mover.mp3"
 
 
 sub discInfoShow
@@ -133,5 +151,20 @@ sub discInfoShow
                 $runTime / 60, $runTime % 60;
         $runTime += $track_seconds [$i] + $gap;
         $i++;
+    }
+}
+
+sub baseFnameGet
+{
+    my $trackNum = shift;
+
+    if ($fnameFormat eq 'eac')
+    {
+        return sprintf ("Unknown Artist - Unknown Title - %02d - Track%02d",
+                       $trackNum, $trackNum);
+    }
+    elsif ($fnameFormat eq 'cdmage')
+    {
+        return sprintf ("IMAGE track %02d AUDIO-2352", $trackNum);
     }
 }
