@@ -1,13 +1,16 @@
 #!/usr/bin/bash
 
-XBOXPATH="/c/xbox/ccxstream-1.0.15-win"
+XBOXPATH="/c/xbox/apps/ccxstream-1.0.15-win"
 HOST="127.0.0.1"
 
 
 function ccxStart()
 {
-   #SHARES="-S \"Pictures\"=\"c:\\Documents and Settings\\All Users\\My Documents\\My Pictures\""
+   SHARES="-S Pictures=c:\\Docume~1\\Alluse~1\Documents\\MyPict~1"
 
+   if [ -d "/cygdrive/d" ]; then
+       SHARES=$SHARES" -S cdrom=d:\\"
+   fi
    if [ -d "/cygdrive/z" ]; then
        SHARES=$SHARES" -S Z=z:\\"
    fi
