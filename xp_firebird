@@ -1,0 +1,16 @@
+#!/sbin/sh
+
+FIREBIRD="/home/sw/bin/MozillaFirebird"
+
+if [ ! -f /home/sw/install/xprint/run_xprint_from_tarball.sh ]; then
+   echo "xprint not found"
+   exit 1
+fi
+
+OP=`sh /home/sw/install/xprint/run_xprint_from_tarball.sh status`
+
+if [ "$OP" = "Xprint is stopped" ]; then
+    sh /home/sw/install/xprint/run_xprint_from_tarball.sh start
+fi
+
+sh /home/sw/install/xprint/run_xprint_from_tarball.sh wrapper "$FIREBIRD" &

@@ -1,0 +1,16 @@
+#!/usr/bin/sh
+
+PORT=$1
+SERVER="titan"
+BNAME=`basename $0`
+
+if [ -z "$PORT" -o "$1" = "-h" -o "$1" = "--help" ]; then
+    echo "\nUsage: $BNAME PORT\n"
+    echo "  Used to kill sessions on the terminal server. PORT is a number "
+    echo "  between 1 and 32."
+    exit 1
+fi
+
+rsh $SERVER touch /export/share/TerminalServer/$PORT
+echo "  Port $PORT scheduled for reset."
+echo "  Please wait (may take up to a minute for reset to happen)..."

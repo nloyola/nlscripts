@@ -1,0 +1,27 @@
+#!/usr/bin/sh
+SCRIPTNAME=`basename $0`
+if [ $# -lt 4 ]
+then
+    echo "usage: $SCRIPTNAME FILE1 FILE2"
+    exit 1
+fi
+
+if [ ! -f "$1" ]
+then
+   echo file $1 does not exist
+   exit 1
+fi
+
+if [ ! -f "$2" ]
+then
+   echo file $2 does not exist
+   exit 1
+fi
+
+if [ ! -f "$3" ]
+then
+   echo file $3 does not exist
+   exit 1
+fi
+
+xemacs -eval "(cc-merge \"$3\" \"$2\" \"$1\" \"$4\")"

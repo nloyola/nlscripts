@@ -1,0 +1,123 @@
+#!/usr/bin/perl -w
+
+package main;
+
+use strict;
+use File::Basename;
+use Getopt::Long;
+
+my $VERSION = '$Revision: 1.1 $';
+
+my $SCRIPTNAME = basename ($0);
+
+my $USAGE = <<USAGE_END;
+Usage: $SCRIPTNAME [options]
+
+  Version: $VERSION
+
+  Displays current load for all Blade 1000 machines on network.
+
+  OPTIONS
+    --debug    Outputs information to aid in debugging.
+    --users    Displays the primary user of the machine.
+USAGE_END
+
+my %machine;
+my $debug;
+my $helpShow;
+my $showUser;
+
+main ();
+
+#------------------------------------------------------------------------------
+#
+#
+#------------------------------------------------------------------------------
+sub trim
+{
+    my @strings = @_;
+    for (@strings)
+    {
+        s/^\s+//;
+        s/\s+$//;
+    }
+    return wantarray ? @strings : $strings[0];
+}
+
+
+#------------------------------------------------------------------------------
+#
+#
+#------------------------------------------------------------------------------
+sub main
+{
+    if (!GetOptions ('debug' => \$debug,
+                     'help'  => \$helpShow,
+                     'users' => \$showUser))
+    {
+        die "ERROR: bad options in command line\n";
+    }
+
+    if ($helpShow)
+    {
+        print $USAGE;
+        exit 0;
+    }
+
+    open (YP, "ypcat hosts.byaddr |")
+        || die "ypcat failed!";
+
+    while (<YP>)
+    {
+        my $line = $_;
+        chomp ($line);
+
+        # look only for Blade 1000 machines
+        if ($line !~ /B1000/) { next; }
+
+        #print $line, "\n";
+
+        # ypcat output uses tabs, so substr wont work
+        if ($line =~ /^([\d\.]+)\s+(\w+)\s+#\s+(\S+)\s+(\S+)\s+(.+)/)
+        {
+            if (defined ($1) && defined ($2))
+            {
+                $machine {$2} {'ip'}    = $1;
+                $machine {$2} {'descr'} = $3;
+                $machine {$2} {'type'}  = $4;
+                $machine {$2} {'user'}  = $5;
+            }
+        }
+    }
+    close (YP);
+
+    # get load values
+    foreach my $host (sort keys %machine)
+    {
+        my $op = `rup $host`;
+
+        if ($op =~ /load average: ([\d\.]+)/)
+        {
+            $machine {$host} {'load'} = $1;
+        }
+        else
+        {
+            $machine {$host} {'load'} = 'unknown';
+        }
+    }
+
+    # print results
+    foreach my $host (sort keys %machine)
+    {
+
+        printf "%-10s %-6s %-18s",
+               $host, $machine {$host} {'load'}, $machine {$host} {'type'};
+
+        if ($showUser)
+        {
+            print $machine {$host} {'user'};
+        }
+
+        print "\n";
+    }
+}

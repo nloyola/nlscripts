@@ -1,0 +1,84 @@
+#!/usr/local/bin/perl -w
+
+#------------------------------------------------------------------------------
+#
+# Name: $Id: p4_unmanaged,v 1.1 2004/01/23 18:20:55 nelson Exp $
+#
+# Description:
+#
+# See $HELP_STR below.
+#
+#------------------------------------------------------------------------------
+
+package Main;
+
+use Cwd;
+
+my $HELP_STR = <<HELP_END;
+Usage: $0 [OPTIONS]
+
+  List all the files in the current directory and its subdirectories that
+  are not checked into perforce, and therefore 'unmanaged'
+
+  OPTIONS
+    -d    Generates debugging information.
+    -h    Generates this text.
+HELP_END
+
+
+my $traceOn = 0;
+
+if (($#ARGV == 0) && ($ARGV [0] eq "-d"))
+{
+    $traceOn = 1;
+}
+elsif ($#ARGV >= 0)
+{
+    die $HELP_STR, "\n";
+}
+
+my $curdir   = getcwd;
+my $name;
+
+# Generate arrays of files perforce knows about 'havelist'
+# and that exist in the filesystem 'locallist'
+@havelist  = `p4 have ...`;
+@filelist = `find . -type f`;
+
+# Iterate over the havelist and add to a hash
+%havehash = ();
+for (@havelist)
+{
+    # $1=p4name $2=version $3=filename
+    /(.*)#(\d+) - (.*)/;
+    ($name = $3) =~ s|$curdir|\.|g;
+    $havehash{$name} = $3;
+    print "have: ", $name, "\n" if $traceOn;
+}
+
+my @notInList;
+
+# Loop through the filelist
+for (@filelist)
+{
+    chomp;
+
+    # if file is not in havelist then push onto @notInList
+    if (!exists ($havehash {$_}))
+    {
+        push (@notInList, ($_));
+    }
+}
+
+if ($#notInList < 0)
+{
+    print "  All files are in the depot.\n";
+    exit;
+}
+
+print "not in depot:\n";
+foreach (@notInList)
+{
+    print "  ", $_, "\n";
+}
+

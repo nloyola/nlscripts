@@ -1,0 +1,78 @@
+#!/opt/gnu/bin/expect -f
+
+set timeout 120
+log_user 0
+#debug 1
+
+if { $argc != 2 } {
+    send_user "ERROR.  Missing arguments\n"
+    send_user "Syntax is \"$argv0 <src file> <dest file name>\"\n"
+    send_user "\n"
+    exit
+}
+set hostname "205.150.87.19"
+
+# this is andrew's login
+#set userid tr72684
+#set password btxr9278
+
+# this is my login
+set userid tr77983
+set password tfde4268
+
+set srcFile [lindex $argv 0]
+set destFile [lindex $argv 1]
+
+send_user "Putting file $srcFile on server as $destFile\n"
+
+send_user "Logging in to double blind server: "
+
+spawn ftp $hostname
+
+expect ": " {
+    send "$userid\r"
+    send_user "Logging in..."
+    expect "Password:" {
+        send "$password\r"
+        expect "> "
+        send_user "logged in..."
+        
+        # Send cd .files
+        send "cd .files\r"
+        expect "> "
+        send "bin\r"
+        expect "> "
+        send "put $srcFile $destFile\r"
+        expect "226 Transfer complete." {
+            send_user "File sent.\n"
+        } timeout {
+            send_user "FILE TRANSFER FAILED\n"
+            exit
+        }
+
+        send "quit\r"
+        expect "Goodbye."
+        send_user "Done.\n"
+
+        send_user "\n" 
+        send_user "\n" 
+        send_user "To get this file, type:\n"
+        send_user "ftp $hostname\n"
+        send_user "Userid: $userid\n"
+        send_user "Password: $password\n"
+        send_user "bin (to get into binary mode)\n"
+        send_user "cd .files\n"
+        send_user "get $destFile\n"
+        send_user "quit\n"
+        send_user "\n"
+        send_user "This file will be available for 24 hours, starting\n"
+        system "date"
+    } timeout {
+    end_user "Invalid password!\n" 
+    }
+} timeout {
+    send_user "Failed to connect!\n"
+}
+
+close $spawn_id
+

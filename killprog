@@ -1,0 +1,78 @@
+#!/bin/ksh
+# killprog: kill a program by name instead of by process id.
+# If there is more than one copy, display a list, and
+# ask to pick the right one.
+# Author: Fred Brunet
+
+Kill=/tmp/killprogout.$$
+if [ $# -eq 0 ]
+then
+   printf "Usage: killprog name\n"
+   exit 1
+fi
+
+# eliminate present program and 'grep $1' from process
+ps -ef | grep -v "grep $1"|grep -v $0| grep $1 > $Kill
+Count=`wc -l $Kill | awk '{ print $1 }'`
+if [ $Count -ge 1 ]
+then
+   awk ' { printf "%2d : %s\n", NR, $0 }' < $Kill
+else
+   printf "No matches to kill\n"
+   if [ -f $Kill ]
+   then
+      rm $Kill
+   fi
+   exit 1
+fi
+printf "Which of the above do you mean:  enter number or '0' to quit: "
+
+while true
+do
+   read lineno
+   # non-numeric data returns 0
+   lcnt=`echo $lineno|awk ' { if ($0 ~ /[^0-9]/ )
+                           print 0
+                        else
+                           print 1 } '`
+   if [ $lcnt -eq 0 ]
+   then
+      printf "Valid input: 1-$Count or '0' to quit.  Reenter number: "
+      continue
+   fi
+
+   # default  to 0 and quit
+   lineno=${lineno:=0}
+   if [ $lineno -eq 0 ]
+   then
+      if [ -f $Kill ]
+      then
+         rm $Kill
+      fi
+      exit 1
+   fi
+
+   if [ $lineno -gt $Count -o $lineno -lt 0 ]
+   then
+      printf "Valid input: 1-$Count or '0' to quit.  Reenter number: "
+   else
+      break
+   fi
+done
+
+Flist=`sed -n "${lineno}p" $Kill`
+echo $Flist | awk '{ printf "%s\n", $0 }'
+Killproc=`echo $Flist | awk '{ print $2 }'`
+printf "Kill ($Killproc) ? y/n "
+read answer
+case $answer in
+   y|Y) kill $Killproc
+        printf "$Killproc terminated!\n";;
+   *)
+        printf "Nothing killed\n";;
+esac
+if [ -f $Kill ]
+then
+   rm $Kill
+fi
+# end killprog

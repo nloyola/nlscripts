@@ -1,0 +1,256 @@
+#!/usr/local/bin/perl -w
+#------------------------------------------------------------------------------
+#
+# Name: $Id: p4UserStats,v 1.1 2004/01/23 18:20:55 nelson Exp $
+#
+#------------------------------------------------------------------------------
+
+use Time::Local;
+use Time::localtime;
+use strict ;
+
+my $USAGE = <<USAGE_END;
+Usage: $0 [yyyy/mm/dd]
+
+    Gives line count statistics on submits made to the OCG perforce depot.
+
+    An optional timestamp can be given and statistics will be given on submits
+    from that date to the present.
+
+    Uses the perforce "changes" and "describe" commands to retrieve the
+    information.
+
+USAGE_END
+
+#------------------------------------------------------------------------------
+#
+#------------------------------------------------------------------------------
+my $P4        = "p4";
+my $depotSpec = "//depot/ne_dev/...";
+my %changeUser;
+my %changeDate;
+my %userAdded;
+my %userDeleted;
+my %userChanged;
+my $startTs;
+
+#------------------------------------------------------------------------------
+#
+#------------------------------------------------------------------------------
+sub printDate
+{
+    my $time = shift;
+    my $tm = localtime ($time);
+    printf ("%04d/%02d/%02d", $tm->year+1900, $tm->mon+1, $tm->mday);
+}
+
+#------------------------------------------------------------------------------
+#
+#------------------------------------------------------------------------------
+sub getChangeTs
+{
+    my $changeDescr = shift;
+    my @test;
+
+    if ($changeDescr =~ m|(....)/(..)/(..)|)
+    {
+        return timelocal (0, 0, 0, int ($3), int ($2) - 1, int ($1));
+    }
+    return 0;
+}
+
+#------------------------------------------------------------------------------
+#
+#------------------------------------------------------------------------------
+sub getChangeUser
+{
+    my $change = shift;
+    my $op;
+    my $user;
+
+    $op = `$P4 change -o $change`;
+    foreach (split ('\n', $op))
+    {
+        if (/User/ && !(/^\#/))
+        {
+            ($user = $_) =~ s/User:\s//;
+            return $user;
+        }
+    }
+}
+
+#------------------------------------------------------------------------------
+#
+#------------------------------------------------------------------------------
+sub getChangesAndUsers
+{
+    my $op;
+    my @changes;
+    my $change;
+    my @changeItem;
+    my $user;
+    my $changeTs;
+
+    $op = `$P4 changes -s submitted $depotSpec`;
+    @changes = split ('\n', $op);
+    foreach $change (@changes)
+    {
+        @changeItem = split (' ', $change);
+        $changeTs = getChangeTs ($change);
+
+        #print "changeTs/", $changeTs, " ", "startTs/", $startTs, "\n";
+
+        if ($changeTs == 0)
+        {
+            die "bad timestamp\n  ", $change, "\n";
+        }
+        elsif ($changeTs >= $startTs)
+        {
+            $changeDate{$changeItem[1]} = $changeTs;
+            $changeUser{$changeItem[1]} = getChangeUser ($changeItem[1]);
+            print "Getting user for change ", $changeItem[1], " on ";
+            printDate ($changeDate{$changeItem[1]});
+            print "\n";
+        }
+        else
+        {
+            print "skipping change ", $changeItem[1], " date ";
+            printDate ($changeTs);
+            print "\n";
+        }
+    }
+}
+
+#------------------------------------------------------------------------------
+#
+#------------------------------------------------------------------------------
+sub getChangeStats
+{
+    my $op;
+    my $change;
+    my $lineStr;
+    my $fname;
+    my $rev;
+
+    foreach $change (sort (keys %changeUser))
+    {
+        $op = `$P4 describe -ds $change`;
+        print "Getting description for change ",$change, "\n";
+        foreach (split ('\n', $op))
+        {
+            if (/ne_dev.*\sadd$/)
+            {
+                if (!exists ($userAdded{$changeUser{$change}}))
+                {
+                    $userAdded{$changeUser{$change}} = 0;
+                }
+
+                # convert p4 output to a revision name
+                $fname = $_;
+                $fname =~ s/^\.\.\.\s*//;
+                $fname =~ s/\s*\sadd//;
+                $op = `p4 print -q $fname | wc -l`;
+                #print "p4 print -q $fname | wc -l => gave $op";
+                #print "wc result ", int ($op), " for ", $fname, "\n";
+                $userAdded{$changeUser{$change}} += int ($op);
+            }
+            if (/ne_dev.*\sdelete$/)
+            {
+                if (!exists ($userDeleted{$changeUser{$change}}))
+                {
+                    $userDeleted{$changeUser{$change}} = 0;
+                }
+
+                # convert p4 output to a revision name, and subtract 1 from
+                # revision number
+                $fname = $_;
+                $fname =~ s/^\.\.\.\s*//;
+                $fname =~ s/\s*\sdelete//;
+                if ($fname =~ s|\#([0-9]+)||)
+                {
+                    $rev = int ($1) - 1;
+                }
+                #print "fname/", $fname, " rev/", $rev, "\n";
+                $op = `p4 print -q $fname#$rev | wc -l`;
+                #print "p4 print -q $fname#$rev | wc -l => gave $op";
+                #print "wc result ", int ($op), " for ", $fname, "\n";
+                $userDeleted{$changeUser{$change}} += int ($op);
+            }
+            if (/add.*lines/)
+            {
+                if (!exists ($userAdded{$changeUser{$change}}))
+                {
+                    $userAdded{$changeUser{$change}} = 0;
+                }
+
+                ($lineStr = $_) =~ s/.* (\d*) lines/$1/;
+                $userAdded{$changeUser{$change}} += int ($lineStr);
+            }
+            if (/deleted.*lines/)
+            {
+                if (!exists ($userDeleted{$changeUser{$change}}))
+                {
+                    $userDeleted{$changeUser{$change}} = 0;
+                }
+
+                ($lineStr = $_) =~ s/.* (\d*) lines/$1/;
+                $userDeleted{$changeUser{$change}} += int ($lineStr);
+            }
+            if (/changed.*lines/)
+            {
+                if (!exists ($userChanged{$changeUser{$change}}))
+                {
+                    $userChanged{$changeUser{$change}} = 0;
+                }
+
+                ($lineStr = $_) =~ s/.* (\d*) lines/$1/;
+                $userChanged{$changeUser{$change}} += int ($lineStr);
+            }
+        }
+    }
+}
+
+#------------------------------------------------------------------------------
+#
+#------------------------------------------------------------------------------
+sub main
+{
+    $startTs = 0;
+    if ($#ARGV == 0)
+    {
+        my $dateStr = $ARGV [0];
+        if ($dateStr =~ m|(....)/(..)/(..)|)
+        {
+            $startTs = timelocal (0, 0, 0, $3, $2-1, $1);
+        }
+        if ($startTs == 0)
+        {
+            die "ERROR: bad timestamp.\n\n", $USAGE;
+        }
+    }
+
+    getChangesAndUsers ();
+    getChangeStats ();
+
+    print "\nLine count results:\n";
+    foreach (keys %userAdded)
+    {
+        printf ("  User/%-10s added/%u\n", $_, $userAdded{$_});
+    }
+    print "\n";
+    foreach (keys %userDeleted)
+    {
+        printf ("  User/%-10s deleted/%u\n", $_, $userDeleted{$_});
+    }
+    print "\n";
+    foreach (keys %userChanged)
+    {
+        printf ("  User/%-10s changed/%u\n", $_, $userChanged{$_});
+    }
+}
+
+#------------------------------------------------------------------------------
+# Script starts here
+#------------------------------------------------------------------------------
+main ();
+

@@ -1,0 +1,87 @@
+#!/usr/local/bin/tcsh
+
+if ($OSTYPE == "solaris") then
+  set TAR = /usr/local/bin/tar
+  set GZIP = /usr/local/bin/gzip
+endif
+
+if ($OSTYPE == "linux") then
+  set TAR = /usr/local/bin/tar
+  set GZIP = /usr/local/bin/gzip
+endif  
+
+cd ~
+
+if ($OSTYPE == "solaris") then
+    $TAR cvf ~/config.tar -C p4user .mycshrc .myaliases .Xdefaults .exrc \
+                                .gdbinit .gnus .gvimrc
+
+    $TAR rvf ~/config.tar -C p4user bin/codestats
+    $TAR rvf ~/config.tar -C p4user bin/config_tar
+    $TAR rvf ~/config.tar -C p4user bin/d2u
+    $TAR rvf ~/config.tar -C p4user bin/makeTemplateTrigger.pl
+    $TAR rvf ~/config.tar -C p4user bin/myvnc
+    $TAR rvf ~/config.tar -C p4user bin/neincludes.pl
+    $TAR rvf ~/config.tar -C p4user bin/nelayers.pl
+    $TAR rvf ~/config.tar -C p4user bin/oseerrcode
+    $TAR rvf ~/config.tar -C p4user bin/p4UserStats
+    $TAR rvf ~/config.tar -C p4user bin/pall
+    $TAR rvf ~/config.tar -C p4user bin/rename
+    $TAR rvf ~/config.tar -C p4user bin/mail_file
+    $TAR rvf ~/config.tar -C p4user bin/send_config
+    $TAR rvf ~/config.tar -C p4user bin/start_gkrellm
+    $TAR rvf ~/config.tar -C p4user bin/start_xmms
+    $TAR rvf ~/config.tar -C p4user bin/xe
+
+    $TAR rvf ~/config.tar -C p4user .xemacs/init.el
+    $TAR rvf ~/config.tar -C p4user .xemacs/custom.el
+
+    $TAR rvf ~/config.tar -C p4user public_html/index.html
+    $TAR rvf ~/config.tar -C p4user public_html/kdeInstall.html
+    $TAR rvf ~/config.tar -C p4user public_html/emacs/index.html
+
+    $TAR rvf ~/config.tar emacs/lisp/site-init.el
+    $TAR rvf ~/config.tar emacs/lisp/column.el
+    $TAR rvf ~/config.tar emacs/lisp/recentf.el
+
+    $TAR rvf ~/config.tar unixnotes.txt
+
+    $TAR rvf ~/config.tar -C /home sw/bin/killprocs
+    $TAR rvf ~/config.tar -C /home sw/bin/killuser
+    $TAR rvf ~/config.tar -C /home sw/bin/p4_unmanaged
+    $TAR rvf ~/config.tar -C /home sw/bin/p4pr
+    $TAR rvf ~/config.tar -C /home sw/bin/pb
+    $TAR rvf ~/config.tar -C /home sw/bin/psgrep
+    $TAR rvf ~/config.tar -C /home sw/bin/psk
+
+    $TAR rvf ~/config.tar -C /home sde/bin/oseerrcode
+    $TAR rvf ~/config.tar -C /home sde/bin/mkmodule
+
+    $TAR rvf ~/config.tar -C /home/sde/xemacs site-lisp/site-init.el
+    $TAR rvf ~/config.tar -C /home/sde/xemacs site-lisp/face-list.el
+    $TAR rvf ~/config.tar -C /home/sde/xemacs site-lisp/doxymacs.el
+    $TAR rvf ~/config.tar -C /home/sde/xemacs site-lisp/xml-parse.el
+
+    cd /home/sde/xemacs
+    foreach f ("site-lisp/color-theme.el.*" "site-lisp/p4.el-*")
+    $TAR rvf ~/config.tar -C /home/sde/xemacs $f
+    end
+
+    $TAR rvf ~/config.tar -C / opt/defaults/cshrc.general
+    $TAR rvf ~/config.tar -C / opt/defaults/cshrc.software
+    $TAR rvf ~/config.tar -C / opt/defaults/cshrc.software.ns
+endif
+
+if ($OSTYPE == "linux") then
+    $TAR cvf ~/config.tar -C ~ .mycshrc .myaliases .Xdefaults .exrc \
+                                   .gdbinit .gnus .gvimrc
+
+    $TAR rvf ~/config.tar -C ~ .xemacs/init.el
+    $TAR rvf ~/config.tar -C ~ .xemacs/custom.el
+
+    $TAR rvf ~/config.tar -C /usr/local bin/rename
+endif
+
+$GZIP -f ~/config.tar
+
+unset TAR GZIP
