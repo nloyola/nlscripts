@@ -1,14 +1,20 @@
 #!/bin/bash --norc
 
 vxsimdir=""
-if [ -n "$OSTYPE" ]; then
-    if [ "$OSTYPE" == "solaris" ]; then
-        vxsimdir = "$P4DIR/proj/swae/vxImage_me_p"
-    fi
-else
-    # assume cygwin
-    vxsimdir = "$P4DIR/proj/swae/vxImage_me_pc"
+if [ -z "$OSTYPE" ]; then
+   echo "environment variable OSTYPE not defined"
+   exit 1
 fi
+
+case $OSTYPE in
+    solaris*)
+        vxsimdir="$P4DIR/proj/swae/vxImage_me_p"
+        ;;
+    *)
+        # assume cygwin
+        vxsimdir="$P4DIR/proj/swae/vxImage_me_pc"
+        ;;
+esac
 
 if [ ! -d $vxsimdir ]; then
    echo "cannot find vxsim directory"
