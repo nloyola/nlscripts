@@ -1,0 +1,23 @@
+#!/usr/bin/tcsh
+
+if ($OSTYPE == "solaris") then
+  set TAR = /opt/gnu/bin/tar
+  set GZIP = /opt/gnu/bin/gzip
+endif
+
+if ($TERM == "cygwin") then
+  set TAR = /usr/bin/tar
+  set GZIP = /usr/bin/gzip
+endif
+
+cd $HOME
+$TAR cvf ~/config.tar .cshrc
+$TAR rvf ~/config.tar .mycshrc
+$TAR rvf ~/config.tar .myaliases
+$TAR rvf ~/config.tar -C /c/Documents\ and\ Settings/nelson My\ Documents/notes.txt
+$TAR rvf ~/config.tar -C /c bin/galroute.bat
+$TAR rvf ~/config.tar -C /c/WINDOWS/SYSTEM32/DRIVERS/ETC HOSTS
+
+$GZIP -f ~/config.tar
+
+unset TAR GZIP

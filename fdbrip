@@ -1,0 +1,137 @@
+#!/usr/local/bin/perl -w
+
+use Getopt::Std;
+use CDDB;
+
+my $HELP_STR = <<HELP_END;
+Usage: $0 [OPTIONS] GENRE CDID
+
+  Converts WAV files to MP3 with ID3 tags from freedb.org. CD has to be
+  converted to an image using Clone CD, then coverted to WAV files using
+  CDmage.
+
+  OPTIONS
+    -s    Show freedb.org content.
+    -h    Generates this text.
+HELP_END
+
+my %option;
+
+getopts ('sh', \%option);
+
+my $fdbgenre = $ARGV [0];
+my $cddbp_id = $ARGV [1];
+my $genre    = $ARGV [2];
+my $year     = $ARGV [3];
+my $gap = 0;
+
+if (!defined ($genre) || !defined ($cddbp_id))
+{
+    die $HELP_STR, "\n";
+}
+
+### Connect to the cddbp server.
+my $cddbp = new CDDB( Host  => 'freedb.freedb.org', # default
+                      Port  => 8880,                # default
+                      Login => "nloyola"
+                    ) or die $!;
+
+### Query disc details (usually done with get_discs() information).
+my $disc = $cddbp->get_disc_details($fdbgenre, $cddbp_id);
+
+my $artist;
+my $title;
+
+($artist, $title) = split ("\\s+/\\s+", $disc->{dtitle} );
+
+if (defined $option {'s'})
+{
+    discInfoShow ($disc);
+    exit;
+}
+
+my $lame_opts = "-b 192 -h --add-id3v2";
+
+my $id3tags_static = "--ta \"$artist\" --tl \"$title\"";
+
+if (defined $genre)
+  {
+      $id3tags_static .= " --tg \"" . $genre ."\"";
+  }
+
+if (defined $year)
+  {
+      $id3tags_static .= " --ty \"" . $year ."\"";
+  }
+
+my @track_titles  = @{$disc->{'ttitles'}};
+my $tnum;
+my $i = 1;
+
+foreach $tname (@track_titles)
+  {
+      $tnum = sprintf ("%02d", $i);
+
+      $tname =~ s/\//-/g;
+
+      #print "lame $lame_opts $id3tags_static "
+      #      . " --tn \"$tnum\" --tt \"$tname\" "
+      #      . "\"IMAGE track $tnum AUDIO-2352.wav\" "
+      #      . " \"$artist - $title - $tnum - $tname.mp3\"\n";
+
+      system ("lame $lame_opts $id3tags_static "
+              . " --tn \"$tnum\" --tt \"$tname\" "
+              . "\"IMAGE track $tnum AUDIO-2352.wav\" "
+              . " \"$artist - $title - $tnum - $tname.mp3\"");
+
+      $i++;
+  }
+
+
+#lame -b 192 -h "IMAGE track 01 AUDIO-2352.wav" --ta "Al Gromer Khan" --ty 1998 --tl "Tantra Drums" --tn 1 --tg 10 --add-id3v2 --tt "Kublai Tec"    "Al Gromer Khan - Tantra Drums - 01 - Kublai Tec.mp3"
+#lame -b 192 -h "IMAGE track 02 AUDIO-2352.wav" --ta "Al Gromer Khan" --ty 1998 --tl "Tantra Drums" --tn 2 --tg 10 --add-id3v2 --tt "The Ritual"    "Al Gromer Khan - Tantra Drums - 02 - The Ritual.mp3"
+#lame -b 192 -h "IMAGE track 03 AUDIO-2352.wav" --ta "Al Gromer Khan" --ty 1998 --tl "Tantra Drums" --tn 3 --tg 10 --add-id3v2 --tt "Agori Dance"   "Al Gromer Khan - Tantra Drums - 03 - Agori Dance.mp3"
+#lame -b 192 -h "IMAGE track 04 AUDIO-2352.wav" --ta "Al Gromer Khan" --ty 1998 --tl "Tantra Drums" --tn 4 --tg 10 --add-id3v2 --tt "Moon Retros"   "Al Gromer Khan - Tantra Drums - 04 - Moon Retros.mp3"
+#lame -b 192 -h "IMAGE track 05 AUDIO-2352.wav" --ta "Al Gromer Khan" --ty 1998 --tl "Tantra Drums" --tn 5 --tg 10 --add-id3v2 --tt "Take This Ruby" "Al Gromer Khan - Tantra Drums - 05 - Take This Ruby.mp3"
+#lame -b 192 -h "IMAGE track 06 AUDIO-2352.wav" --ta "Al Gromer Khan" --ty 1998 --tl "Tantra Drums" --tn 6 --tg 10 --add-id3v2 --tt "Tantra Drums"  "Al Gromer Khan - Tantra Drums - 06 - Tantra Drums.mp3"
+#lame -b 192 -h "IMAGE track 07 AUDIO-2352.wav" --ta "Al Gromer Khan" --ty 1998 --tl "Tantra Drums" --tn 7 --tg 10 --add-id3v2 --tt "Kula"          "Al Gromer Khan - Tantra Drums - 07 - Kula.mp3"
+#lame -b 192 -h "IMAGE track 08 AUDIO-2352.wav" --ta "Al Gromer Khan" --ty 1998 --tl "Tantra Drums" --tn 8 --tg 10 --add-id3v2 --tt "Blue Raga"     "Al Gromer Khan - Tantra Drums - 08 - Blue Raga.mp3"
+#lame -b 192 -h "IMAGE track 09 AUDIO-2352.wav" --ta "Al Gromer Khan" --ty 1998 --tl "Tantra Drums" --tn 9 --tg 10 --add-id3v2 --tt "Conga Jog"     "Al Gromer Khan - Tantra Drums - 09 - Conga Jog.mp3"
+#lame -b 192 -h "IMAGE track 10 AUDIO-2352.wav" --ta "Al Gromer Khan" --ty 1998 --tl "Tantra Drums" --tn 10 --tg 10 --add-id3v2 --tt "Unmoved Mover" "Al Gromer Khan - Tantra Drums - 10 - Unmoved Mover.mp3"
+
+
+sub discInfoShow
+{
+    my $disc_info = shift;
+
+    if (!defined @{$disc_info->{offsets}})
+    {
+        printf STDERR "no disc information\n";
+        return;
+    }
+
+    my $disc_time     = $disc_info->{'disc length'};
+    my $disc_id       = $disc_info->{discid};
+    my $disc_title    = $disc_info->{dtitle};
+
+    my @track_offsets = @{$disc_info->{offsets}};
+    my @track_seconds = @{$disc_info->{seconds}};
+    my @track_titles  = @{$disc_info->{ttitles}};
+
+    print "  artist:   ", $artist, "\n",
+          "  title:    ", $title, "\n";
+    $disc_time =~ s/\s+seconds$//g;
+    print "  run time: ", int ($disc_time/60), ":", $disc_time%60, "\n";
+
+    my $runTime = 0;
+    my $i=0;
+    foreach my $tname (@track_titles)
+    {
+        $tname =~ s/\//-/g;
+        printf "  %3d - %-40.40s [%02d:%02d] [%02d:%02d]\n", $i+1, $tname,
+            $track_seconds [$i] /60, $track_seconds [$i] % 60,
+                $runTime / 60, $runTime % 60;
+        $runTime += $track_seconds [$i] + $gap;
+        $i++;
+    }
+}

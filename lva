@@ -1,0 +1,512 @@
+#!/usr/local/bin/perl -w
+
+package lva;
+
+use strict;
+use File::Basename;
+use File::Find;
+use Getopt::Long;
+use File::Copy;
+
+my $SCRIPTNAME = basename ($0);
+
+my $USAGE = <<USAGE_END;
+Usage: $SCRIPTNAME [options] PATH
+
+  Analyses the Lab Validation test case results database. PATH is the path to
+  the root directory containing the lab validation test case results.
+
+  OPTIONS
+    --debug    Outputs information to aid in debugging.
+USAGE_END
+
+my $labValDir = '/home/nelson/src/msf250LabVal/tcs';
+
+my $debug;
+my %tc;
+my @tags = qw (DATE REASON COMPLETE STATUS FAIL_INFO GNATS COMMENTS);
+
+my $TABLE_HEADING =
+    "   TC                         PARTIAL                PARTIAL\n" .
+    "  class     #TC  COMPLETE    COMPLETE    PASSED      PASSED\n" .
+    "  --------  --- ----------- ----------- ----------- -----------\n";
+
+my $RESULTS_FMT_STR =
+    "  %-8s %4d  %3d (%3d%%)  %3d (%3d%%)  %3d (%3d%%)  %3d (%3d%%)\n";
+
+main ();
+
+#------------------------------------------------------------------------------
+#
+# Converts hex or decimal strings to a number.
+#
+#------------------------------------------------------------------------------
+sub validateNumber
+{
+    my $input = shift;
+
+    if ($input !~ /[\dxA-Faff]+/)
+    {
+        return 0;
+    }
+
+    return 1;
+}
+
+#------------------------------------------------------------------------------
+#
+#
+#
+#------------------------------------------------------------------------------
+sub parseTestCase
+{
+    my $fname = shift;
+    my $fullname = shift;
+    my $line;
+    my $testClass;
+    my $testNumber;
+    my $multiline;
+    my $currTag;
+    my $accStr;
+    my @splitLine;
+
+    if ($fname !~ /^tcMSF250(\w+)_(\d{4})\.txt/)
+    {
+        return;
+    }
+
+    #print "parsing ", $fname, " ...\n";
+
+    $testClass  = $1;
+    $testNumber = $2;
+
+    $tc{$testClass}{$testNumber}{'fname'}    = $fname;
+    $tc{$testClass}{$testNumber}{'fullname'} = $fullname;
+
+    open FH, $fullname or die "couldn't open ", $fullname, ": $!";
+    $multiline = 0;
+    $currTag = "";
+    $accStr = "";
+    while (<FH>)
+    {
+        $line = $_;
+        $line =~ s/#.+$//g;
+        $line =~ s/^\s+//;           # strip leading white space
+        $line =~ s/\s+$//;           # strip trailing white space
+        $line =~ s/\s+/ /g;          # replace whitespace with single space
+
+        if ($line eq "")
+        {
+            $multiline = 0;
+            if (($currTag ne "") && defined ($accStr))
+            {
+                $tc {$testClass} {$testNumber} {$currTag} = $accStr;
+                $currTag = "";
+                $accStr = "";
+            }
+            next;
+        }
+
+        if ($line =~ /=/)
+        {
+            if (($currTag ne "") && defined ($accStr))
+            {
+                # process previous line
+                $tc {$testClass} {$testNumber} {$currTag} = $accStr;
+                $currTag = "";
+                $accStr = "";
+            }
+
+            @splitLine = split (/\s=\s/, $line);
+            if ($#splitLine > 2)
+            {
+                die "ERROR: badly formatted line:\n", $fullname, "\n", $line;
+            }
+
+            $currTag = $splitLine [0];
+            if (($currTag eq 'REASON') || ($currTag eq 'STATUS'))
+            {
+                $accStr = uc ($splitLine [1]);
+            }
+            else
+            {
+                $accStr = $splitLine [1];
+            }
+        }
+        else
+        {
+            $accStr .= " " . $line;
+        }
+    }
+    close (FH);
+
+    if (($currTag ne "") && defined ($accStr))
+    {
+        $tc{$testClass} {$testNumber} {$currTag} = $accStr;
+    }
+
+    #print $fname, "\t", $fullname, "\n";
+    #print $fname, " ", $1, " ", $2, "\n";
+}
+
+#-----------------------------------------------------------------------------
+#
+# processFile
+#
+#-----------------------------------------------------------------------------
+sub processFile
+{
+    my ($dev,$ino,$mode,$nlink,$uid,$gid);
+
+    ($dev,$ino,$mode,$nlink,$uid,$gid) = lstat($_);
+
+    # only process files
+    if (!-f $_) { return; }
+
+    parseTestCase ($_, $File::Find::name);
+
+    #print $File::Find::name, "\n";
+    #$File::Find::prune = 0;
+}
+
+#-----------------------------------------------------------------------------
+#
+# Returns a precentage in integer format. Note that rounding up is done.
+#
+#-----------------------------------------------------------------------------
+sub percentGet
+{
+    return ((1000 * $_[0]) / $_[1] + 5) / 10;
+}
+
+#-----------------------------------------------------------------------------
+#
+#
+#
+#-----------------------------------------------------------------------------
+sub printTcResults
+{
+    my $class                  = shift;
+    my $tcCount                = shift;
+    my $tcCountComplete        = shift;
+    my $tcCountPartialComplete = shift;
+    my $tcCountPassed          = shift;
+    my $tcCountPartialPass     = shift;
+
+    printf $RESULTS_FMT_STR,
+           $class,
+           $tcCount,
+           $tcCountComplete,
+           percentGet ($tcCountComplete, $tcCount),
+           $tcCountPartialComplete,
+           percentGet ($tcCountPartialComplete, $tcCount),
+           $tcCountPassed,
+           percentGet ($tcCountPassed, $tcCount),
+           $tcCountPartialPass,
+           percentGet ($tcCountPartialPass, $tcCount);
+}
+
+#-----------------------------------------------------------------------------
+#
+# tcStatsByPhaseGet
+#
+#-----------------------------------------------------------------------------
+sub tcStatsByPhaseGet
+{
+    my $class = shift;
+    my $phase = shift;
+
+    my $tcCount = 0;
+    my $tcCountComplete = 0;
+    my $tcCountPartialComplete = 0;
+    my $tcCountPassed = 0;
+    my $tcCountPartialPass = 0;
+
+
+    for my $tcNum (sort keys % {$tc{$class}})
+    {
+        if ($tcNum !~ /$phase\d\d\d/)
+        {
+            # skip test cases not belonging to requested phase
+            next;
+        }
+
+        $tcCount++;
+        foreach my $tag (@tags)
+        {
+            if (!defined ($tc{$class}{$tcNum}{$tag}))
+            {
+                next;
+            }
+
+            if ($tag eq 'STATUS')
+            {
+                if ($tc {$class} {$tcNum} {$tag} eq 'P')
+                {
+                    $tcCountPassed++;
+                }
+                if ($tc {$class} {$tcNum} {$tag} eq 'PP')
+                {
+                    $tcCountPartialPass++;
+                }
+            }
+
+            if ($tag eq 'COMPLETE')
+            {
+                if ($tc {$class} {$tcNum} {$tag} eq '100')
+                {
+                    $tcCountComplete++;
+                }
+                elsif ($tc {$class} {$tcNum} {$tag} ne '0')
+                {
+                    $tcCountPartialComplete++;
+                }
+            }
+        }
+    }
+
+    return ($tcCount, $tcCountComplete, $tcCountPartialComplete,
+            $tcCountPassed, $tcCountPartialPass);
+}
+
+#-----------------------------------------------------------------------------
+#
+# tcStatsByClassGet
+#
+#-----------------------------------------------------------------------------
+sub tcStatsByClassGet
+{
+    my $class = shift;
+
+    my $tcCount = 0;
+    my $tcCountComplete = 0;
+    my $tcCountPartialComplete = 0;
+    my $tcCountPassed = 0;
+    my $tcCountPartialPass = 0;
+
+
+    for my $tcNum (sort keys % {$tc{$class}})
+    {
+        $tcCount++;
+        foreach my $tag (@tags)
+        {
+            if (!defined ($tc{$class}{$tcNum}{$tag}))
+            {
+                next;
+            }
+
+            if ($tag eq 'STATUS')
+            {
+                if ($tc {$class} {$tcNum} {$tag} eq 'P')
+                {
+                    $tcCountPassed++;
+                }
+                if ($tc {$class} {$tcNum} {$tag} eq 'PP')
+                {
+                    $tcCountPartialPass++;
+                }
+            }
+
+            if ($tag eq 'COMPLETE')
+            {
+                if ($tc {$class} {$tcNum} {$tag} eq '100')
+                {
+                    $tcCountComplete++;
+                }
+                elsif ($tc {$class} {$tcNum} {$tag} ne '0')
+                {
+                    $tcCountPartialComplete++;
+                }
+            }
+        }
+    }
+
+    return ($tcCount, $tcCountComplete, $tcCountPartialComplete,
+            $tcCountPassed, $tcCountPartialPass);
+}
+
+#-----------------------------------------------------------------------------
+#
+# tcStatsGet
+#
+#-----------------------------------------------------------------------------
+sub tcStatsGet
+{
+    my $tcCount = 0;
+    my $tcCountComplete = 0;
+    my $tcCountPartialComplete = 0;
+    my $tcCountPassed = 0;
+    my $tcCountPartialPass = 0;
+
+    print "\n\nOVERALL RESULTS\n", $TABLE_HEADING;
+
+    for my $class (sort keys %tc)
+    {
+        my @result = tcStatsByClassGet ($class);
+
+        $tcCount                += $result [0];
+        $tcCountComplete        += $result [1];
+        $tcCountPartialComplete += $result [2];
+        $tcCountPassed          += $result [3];
+        $tcCountPartialPass     += $result [4];
+
+        if ($result [0] != 0)
+        {
+            printTcResults ($class, @result);
+        }
+    }
+
+    printTcResults ("TOTAL", $tcCount, $tcCountComplete,
+                    $tcCountPartialComplete, $tcCountPassed,
+                    $tcCountPartialPass);
+
+    for (my $phase = 1; $phase <= 4; $phase++)
+    {
+        $tcCount = 0;
+        $tcCountComplete = 0;
+        $tcCountPartialComplete = 0;
+        $tcCountPassed = 0;
+        $tcCountPartialPass = 0;
+
+        print "\n\nPHASE ", $phase, " RESULTS\n", $TABLE_HEADING;
+
+        for my $class (sort keys %tc)
+        {
+            my @result = tcStatsByPhaseGet ($class, $phase);
+
+            $tcCount                += $result [0];
+            $tcCountComplete        += $result [1];
+            $tcCountPartialComplete += $result [2];
+            $tcCountPassed          += $result [3];
+            $tcCountPartialPass     += $result [4];
+
+            if ($result [0] != 0)
+            {
+                printTcResults ($class, @result);
+            }
+        }
+
+        printTcResults ("TOTAL", $tcCount, $tcCountComplete,
+                        $tcCountPartialComplete, $tcCountPassed,
+                        $tcCountPartialPass);
+    }
+}
+
+#-----------------------------------------------------------------------------
+#
+# tcStatsGet
+#
+#-----------------------------------------------------------------------------
+sub tcFinishedReport
+{
+    print "PASSED TEST CASES\n";
+
+    for my $class (sort keys %tc)
+    {
+        for my $tcNum (sort keys % {$tc{$class}})
+        {
+            foreach my $tag (@tags)
+            {
+                if (!defined ($tc{$class}{$tcNum}{$tag}))
+                {
+                    next;
+                }
+
+                if ($tag eq 'STATUS')
+                {
+                    if ($tc {$class} {$tcNum} {$tag} eq 'P')
+                    {
+                        print "  ", $tc{$class}{$tcNum}{'fname'}, "\n";
+                    }
+                }
+            }
+        }
+    }
+
+    print "\n\n";
+    print "PARTIAL PASSED TEST CASES\n";
+
+    for my $class (sort keys %tc)
+    {
+        for my $tcNum (sort keys % {$tc{$class}})
+        {
+            foreach my $tag (@tags)
+            {
+                if (!defined ($tc{$class}{$tcNum}{$tag}))
+                {
+                    next;
+                }
+
+                if ($tag eq 'STATUS')
+                {
+                    if ($tc {$class} {$tcNum} {$tag} eq 'PP')
+                    {
+                        print "  ", $tc{$class}{$tcNum}{'fname'}, "\n";
+                    }
+                }
+            }
+        }
+    }
+}
+
+#-----------------------------------------------------------------------------
+#
+# tcInfoShow
+#
+#-----------------------------------------------------------------------------
+sub tcInfoShow
+{
+    for my $class (sort keys %tc)
+    {
+        for my $tcNum (sort keys % {$tc{$class}})
+        {
+            print $class, " ", $tcNum, " ",
+                $tc {$class} {$tcNum} {'fname'}, "\n";
+
+            foreach my $tag (@tags)
+            {
+                if (!defined ($tc{$class}{$tcNum}{$tag}))
+                {
+                    next;
+                }
+
+                print "   ", $tag, ": ", $tc {$class} {$tcNum} {$tag}, "\n";
+            }
+        }
+    }
+}
+
+#-----------------------------------------------------------------------------
+#  main
+#
+#     Iterate through all sub-directories and write wincam macro file
+#-----------------------------------------------------------------------------
+sub main
+{
+    if (!GetOptions ('debug' => \$debug))
+    {
+        die "ERROR: bad options in command line\n";
+    }
+
+    #print "argc:", $#ARGV, " argv[0]/", $ARGV [0], "\n";
+
+    if ($#ARGV != 0)
+    {
+        die "$USAGE\n";
+    }
+
+    $labValDir = $ARGV [0];
+
+    File::Find::find ( {wanted => \&processFile}, $labValDir);
+
+    if ($debug)
+    {
+        tcInfoShow ();
+    }
+
+    tcFinishedReport ();
+    tcStatsGet ();
+}
+
+1;
+

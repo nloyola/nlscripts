@@ -1,0 +1,100 @@
+#!/usr/bin/perl -w
+# psgrep - print selected lines of ps output by
+#          compiling user queries into code
+
+use strict;
+
+# each field from the PS header
+my @fieldnames = qw(UID PID PPID C STIME TTY TIME CMD);
+
+# determine the unpack format needed (hard-coded for Linux ps)
+my $fmt = cut2fmt(9, 15, 21, 25, 33, 42, 48);
+
+my %fields;                         # where the data will store
+
+die <<Thanatos unless @ARGV;
+usage: $0 criterion ...
+    Each criterion is a Perl expression involving:
+     @fieldnames
+    All criteria must be met for a line to be printed.
+Thanatos
+
+# Create function aliases for uid, size, UID, SIZE, etc.
+# Empty parens on closure args needed for void prototyping.
+for my $name (@fieldnames)
+{
+    no strict 'refs';
+    *$name = *{lc $name} = sub () { $fields{$name} };
+}
+
+my $code = "sub is_desirable { " . join(" and ", @ARGV) . " } ";
+#print "$code\n";
+
+unless (eval $code.1)
+{
+    die "Error in code: $@\n\t$code\n";
+}
+
+open(PS, "ps -ef |")
+    || die "cannot fork: $!";
+
+print scalar <PS>;                  # emit header line
+
+while (<PS>)
+{
+    @fields {@fieldnames} = trim(unpack($fmt, $_));
+    if (/$0/) { next; }             # dont list our own process
+    print if is_desirable();        # line matches their criteria
+}
+close(PS)
+    || die "ps failed!";
+
+# convert cut positions to unpack format
+sub cut2fmt
+{
+    my(@positions) = @_;
+    my $template  = '';
+    my $lastpos   = 1;
+    for my $place (@positions)
+    {
+        $template .= "A" . ($place - $lastpos) . " ";
+        $lastpos   = $place;
+    }
+    $template .= "A*";
+    return $template;
+}
+
+sub trim
+{
+    my @strings = @_;
+    for (@strings)
+    {
+        s/^\s+//;
+        s/\s+$//;
+    }
+    return wantarray ? @strings : $strings[0];
+}
+
+# the following was used to determine column cut points.
+# sample input data follows
+#123456789012345678901234567890123456789012345678901234567890123456789012345
+#         1         2         3         4         5         6         7
+# Positioning:
+#        9     15    21  25      33       42    48
+#        |     |     |   |       |        |     | 
+__END__
+#     UID   PID  PPID  C    STIME TTY      TIME CMD
+#    root     0     0  0   Apr 26 ?        0:16 sched
+#    root     1     0  0   Apr 26 ?        6:00 /etc/init -
+#    root     2     0  0   Apr 26 ?        0:01 pageout
+#    root     3     0  0   Apr 26 ?       225:16 fsflush
+#    root   316     1  0   Apr 26 ?        0:00 /usr/lib/saf/sac -t 300
+#    root   239     1  0   Apr 26 ?        0:01 /usr/lib/utmpd
+#    root   131     1  0   Apr 26 ?        0:44 /usr/sbin/rpcbind
+#    root    55     1  0   Apr 26 ?        0:01 /usr/lib/sysevent/syseventd
+#    root    68     1  0   Apr 26 ?       17:04 /usr/lib/picl/picld
+#    root    58     1  0   Apr 26 ?        0:00 devfsadmd
+#    root   191     1  0   Apr 26 ?        0:03 /usr/sbin/syslogd
+#    root   166     1  0   Apr 26 ?        0:02 /usr/sbin/inetd -s
+#    root   134     1  0   Apr 26 ?        0:00 /usr/sbin/keyserv
+#  daemon   167     1  0   Apr 26 ?        0:00 /usr/lib/nfs/statd

@@ -1,0 +1,217 @@
+#!/usr/local/bin/perl -w
+
+use Getopt::Std;
+use CDDB;
+
+my $HELP_STR = <<HELP_END;
+Usage: $0 [OPTIONS] GENRE CDID
+
+  Accesses freedb.org and retrieves cd information.
+
+  OPTIONS
+    -c    Output in CUE sheet format.
+    -s    Output in CDDB CUE sheet format.
+    -f    Do not count first 2 second pause.
+    -t    Show track frame offsets.
+    -d    Generates debugging information.
+    -h    Generates this text.
+HELP_END
+
+my %option;
+my $traceOn = 0;
+
+getopts ('csfdhtg:', \%option);
+
+if (defined ($option {d}))
+{
+    $traceOn = 1;
+}
+
+my $genre    = $ARGV [0];
+my $cddbp_id = $ARGV [1];
+
+my $gap = 0;
+if (defined $option {g})
+{
+    $gap = $option {g};
+}
+
+if (!defined ($genre) || !defined ($cddbp_id))
+{
+    die $HELP_STR, "\n";
+}
+
+### Connect to the cddbp server.
+my $cddbp = new CDDB( Host  => 'freedb.freedb.org', # default
+                      Port  => 8880,                # default
+                      Login => "nloyola"
+                    ) or die $!;
+
+### Query disc details (usually done with get_discs() information).
+my $disc_info = $cddbp->get_disc_details($genre, $cddbp_id);
+
+if (defined $option{c})
+{
+    cueSheetMake ($disc_info);
+    exit;
+}
+
+if (defined $option{s})
+{
+    cddbCueSheetMake ($disc_info);
+    exit;
+}
+
+if (defined $option{t})
+{
+    trackInfoShow ($disc_info);
+    exit;
+}
+
+discInfoShow ($disc_info);
+
+sub discInfoShow
+{
+    my $disc_info = shift;
+
+    if (!defined @{$disc_info->{offsets}})
+    {
+        printf STDERR "no disc information\n";
+        return;
+    }
+
+    my $disc_time     = $disc_info->{'disc length'};
+    my $disc_id       = $disc_info->{discid};
+    my $disc_title    = $disc_info->{dtitle};
+
+    my @track_offsets = @{$disc_info->{offsets}};
+    my @track_seconds = @{$disc_info->{seconds}};
+    my @track_titles  = @{$disc_info->{ttitles}};
+
+    print "  title:    ", $disc_info->{dtitle}, "\n";
+    $disc_time =~ s/\s+seconds$//g;
+    print "  run time: ", int ($disc_time/60), ":", $disc_time%60, "\n";
+
+    my $runTime = 0;
+    my $i=0;
+    foreach (@track_titles)
+    {
+        printf "  %3d - %-40.40s [%02d:%02d] [%02d:%02d]\n", $i+1, $_,
+            $track_seconds [$i] /60, $track_seconds [$i] % 60,
+                $runTime / 60, $runTime % 60;
+        $runTime += $track_seconds [$i] + $gap;
+        $i++;
+    }
+}
+
+sub trackInfoShow
+{
+    my $disc_info = shift;
+
+    my $disc_time     = $disc_info->{'disc length'};
+    my $disc_id       = $disc_info->{discid};
+    my $disc_title    = $disc_info->{dtitle};
+    my @track_offsets = @{$disc_info->{offsets}};
+    my @track_seconds = @{$disc_info->{seconds}};
+    my @track_titles  = @{$disc_info->{ttitles}};
+
+    print "  title:    ", $disc_info->{dtitle}, "\n";
+    $disc_time =~ s/\s+seconds$//g;
+    print "  run time: ", int ($disc_time/60), ":", $disc_time%60, "\n";
+
+    my $firstFrameOffset = 0;
+    if ($option{f})
+    {
+        $firstFrameOffset = $track_offsets [0];
+    }
+
+    my $i=0;
+    my $trackOffset;
+
+    foreach (@track_titles)
+    {
+        $trackOffset = $track_offsets [$i] - $firstFrameOffset;
+
+        printf "  %3d - %-40.40s [%02d:%02d] [%02d:%02d.%02d]\n", $i+1, $_,
+            $track_seconds [$i] /60, $track_seconds [$i] % 60,
+                $trackOffset / 60 / 75,
+                ($trackOffset / 75) % 60,
+                $trackOffset % 75;
+        $i++;
+    }
+}
+
+sub cueSheetMake
+{
+    my $disc_info = shift;
+
+    my $disc_time     = $disc_info->{'disc length'};
+    my $disc_id       = $disc_info->{discid};
+    my $disc_title    = $disc_info->{dtitle};
+    my @track_offsets = @{$disc_info->{offsets}};
+    my @track_seconds = @{$disc_info->{seconds}};
+    my @track_titles  = @{$disc_info->{ttitles}};
+
+    print "FILE \"\" BINARY\n";
+
+    my $firstFrameOffset = 0;
+    if ($option{f})
+    {
+        $firstFrameOffset = $track_offsets [0];
+    }
+    my $i=0;
+    my $trackOffset;
+
+    foreach (@track_titles)
+    {
+        $trackOffset = $track_offsets [$i] - $firstFrameOffset;
+
+        printf "  TRACK %02d AUDIO\n", $i+1;
+
+        printf "    INDEX 01 %02d:%02d:%02d\n",
+                $trackOffset / 60 / 75,
+                ($trackOffset / 75) % 60,
+                $trackOffset % 75;
+        $i++;
+    }
+}
+
+sub cddbCueSheetMake
+{
+    my $disc_info = shift;
+
+    my $disc_time     = $disc_info->{'disc length'};
+    my $disc_id       = $disc_info->{discid};
+    my $disc_title    = $disc_info->{dtitle};
+    my @track_offsets = @{$disc_info->{offsets}};
+    my @track_seconds = @{$disc_info->{seconds}};
+    my @track_titles  = @{$disc_info->{ttitles}};
+
+    print "PERFORMER \"\"\n";
+    print "TITLE \"", $disc_info->{dtitle}, "\"\n";
+    print "FILE \"\" WAVE\n";
+
+    my $firstFrameOffset = 0;
+    if ($option{f})
+    {
+        $firstFrameOffset = $track_offsets [0];
+    }
+    my $i=0;
+    my $trackOffset;
+
+    foreach (@track_titles)
+    {
+        $trackOffset = $track_offsets [$i] - $firstFrameOffset;
+
+        printf "  TRACK %02d AUDIO\n", $i+1;
+
+        printf "    TITLE \"%s\"\n", $_;
+        print  "    PERFORMER \"\"\n";
+
+        printf "    INDEX 01 %02d:%02d:%02d\n",
+                $trackOffset / 60 / 75,
+                ($trackOffset / 75) % 60,
+                $trackOffset % 75;
+        $i++;
+    }
+}

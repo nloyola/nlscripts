@@ -1,0 +1,23 @@
+#!/bin/sh 
+#
+
+if [ $# -ne 1 ] 
+then
+	echo ""
+	echo "Usage:	$0 processName"
+	echo ""
+	exit 1
+fi
+
+num=`ps -fe | grep $1 | grep -v $0 | grep -v grep | awk '{ print $2 }' | wc -l`
+for pid in `ps -fe | grep $1 | grep -v $0 | grep -v grep | awk '{ print $2 }'`
+do
+
+#	echo "Killing pid $pid"  # Removed to speed things up
+#        ps -ef | grep $pid
+	kill -9 $pid
+done
+echo Killed $num processes
+#
+# End of script 
+#

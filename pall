@@ -1,0 +1,142 @@
+#!/usr/bin/perl -w
+
+use File::Find;
+use Getopt::Long;
+use File::Copy;
+
+my $USAGE = <<USAGE_END;
+Usage: $0 [options] OPERATOR ext1 ext2 ...
+
+  For each file with matching extension applies the search and replace
+  operation given in OPERATOR.
+
+    Options
+      --grep    Searches for files containing specified text.
+      --p4      Checks out files from Perforce repository before applying change.
+      --query   Only displays the changes, does not actually apply them.
+USAGE_END
+
+my $op;
+my @files;
+my $grepOnly = 0;
+my $p4edit = 0;
+my $queryOnly = 0;
+
+main ();
+
+#-----------------------------------------------------------------------------
+#  processFile
+#
+#-----------------------------------------------------------------------------
+sub processFile
+{
+    # only process files
+    if (!-f $_) { return; }
+
+    my $fname = $_;
+    my $fspec;
+
+    my $haveMatch = 0;
+
+    foreach $fspec (@files)
+    {
+        if ($fname =~ /$fspec/)
+        {
+            $haveMatch = 1;
+            last;
+        }
+    }
+
+    if (!$haveMatch) { return; }
+
+    # only doing a grep
+    if ($grepOnly)
+    {
+        $ARGV[0] = $fname;
+        local $/ = undef;
+        my @match = grep (/$op/, split ('\n', <>));
+        foreach (@match)
+        {
+            print $File::Find::name, ": ", $_, "\n";
+        }
+        return;
+    }
+
+    # only get here if doing search & replace
+    $ARGV[0] = $fname;
+    local $/ = undef;
+    my $contents = <>;
+    $_ = $contents;
+    eval $op;
+    die $@ if $@;
+
+    if ($_ eq $contents) { return; }
+
+    if ($p4edit && (! $queryOnly))
+    {
+        my $o = `p4 -c $ENV{'P4CLIENT'} edit $File::Find::name`;
+        print $o, "\n";
+    }
+    else
+    {
+        print $File::Find::name, "\n";
+    }
+
+    if ((-w $fname) && (! $queryOnly))
+    {
+        open (TMP, "> /tmp/xxx");
+        print TMP $_;
+        close (TMP);
+        copy ("/tmp/xxx", $fname);
+        #print $result, " here\n";
+    }
+    else
+    {
+        open (TMP, "> /tmp/xxx");
+        print TMP $_;
+        close (TMP);
+        my $o = `diff -bw $fname /tmp/xxx`;
+        print $o, "\n";
+    }
+
+    #$File::Find::prune = 0;
+}
+
+#-----------------------------------------------------------------------------
+# main
+#
+# Iterate through all sub-directories
+#-----------------------------------------------------------------------------
+sub main
+{
+    if (!GetOptions ('grep'  => \$grepOnly,
+                     'p4'    => \$p4edit,
+                     'query' => \$queryOnly))
+    {
+        die "ERROR: bad options in command line\n";
+    }
+
+    if ($#ARGV < 1)
+    {
+        die "$USAGE\n";
+    }
+
+    if ($p4edit)
+    {
+        if (!defined ($ENV {'P4CLIENT'}))
+        {
+            die "Environment variable P4CLIENT not defined\n";
+        }
+    }
+
+    $op = shift @ARGV;
+    @files = @ARGV;
+
+    #print @files, "\n";
+
+    File::Find::find ( {wanted => \&processFile}, '.');
+}
+
+
+1;
+

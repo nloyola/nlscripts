@@ -1,0 +1,7 @@
+#!/usr/bin/tcsh
+
+if ( `(gnuclient -q $* &) |& wc -l` != 0) then
+   # need to start XEmacs
+   /usr/bin/xemacs $* &
+endif
+

@@ -1,0 +1,5 @@
+#!/bin/sh
+
+#
+
+xemacs -batch --no-site-file -l ~/.xemacs/diary-batch.el -e diary-batch

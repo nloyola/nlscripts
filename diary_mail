@@ -1,0 +1,5 @@
+#!/bin/sh
+
+# get a 7-day itinerary mailed to me
+
+xemacs --batch --eval "(setq diary-mail-days 7)" -l diary-lib -f diary-mail-entries
