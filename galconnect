@@ -1,0 +1,57 @@
+#!/usr/bin/perl -w
+
+use strict;
+my $USAGE = <<USAGE_END;
+Usage: $0
+
+  Used to connect to a VPN connection and configure routing tables
+  accordingly.
+USAGE_END
+
+main ();
+
+#-----------------------------------------------------------------------------
+#
+# main
+#
+#-----------------------------------------------------------------------------
+sub main
+{
+    if ($#ARGV >= 0)
+    {
+        die $USAGE, "\n";
+    }
+
+    # dial the VPN connection
+    `rasdial "Galazar T1" nloyola "tb36>me"`;
+
+    my $pppAdapterFound = 0;
+    my $gateway;
+    my @op = `ipconfig`;
+    foreach (@op)
+    {
+        #print $_;
+        if (/PPP adapter/)
+        {
+            $pppAdapterFound = 1;
+        }
+
+        if ($pppAdapterFound && (/Default Gateway[\s\.]+\s:\s([\d\.]+)/))
+        {
+            $gateway = $1;
+        }
+    }
+
+    if (defined ($gateway))
+    {
+        print "gateway: ", $gateway, "\n";
+        `route delete 0.0.0.0`;
+        `route add 0.0.0.0 mask 0.0.0.0 192.168.2.1`;
+        `route add 192.168.1.0 mask 255.255.255.0 $gateway`;
+        `route add 192.168.3.0 mask 255.255.255.0 $gateway`;
+    }
+}
+
+
+1;
+
