@@ -11,6 +11,10 @@ function ccxStart()
    if [ -d "/cygdrive/z" ]; then
        SHARES=$SHARES" -S Z=z:\\"
    fi
+
+   if [ -d "/cygdrive/m" ]; then
+       SHARES=$SHARES" -S M=m:\\"
+   fi
    SHARES=$SHARES" -S torrents=c:\\torrents"
 
    echo "$SHARES"

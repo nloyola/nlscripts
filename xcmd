@@ -2,7 +2,7 @@
 
 #------------------------------------------------------------------------------
 #
-# Name: $Id: xcmd,v 1.2 2004/11/30 20:17:15 nloyola Exp $
+# Name: $Id: xcmd,v 1.3 2004/12/01 06:00:28 nloyola Exp $
 #
 # See $USAGE.
 #
@@ -10,6 +10,7 @@
 
 use strict;
 use Expect;
+use Getopt::Long;
 
 #
 # Tell Perl where to find our module
@@ -56,7 +57,7 @@ sub telnetConnect
 {
     my $login = shift;
     my $passwd = shift;
-    my $connTimeout = 5;
+    my $connTimeout = 15;
 
     my $stdOutLog = $exp->log_stdout ();
     #$exp->log_stdout (0); # suppress output
@@ -139,12 +140,23 @@ sub cmd
 #------------------------------------------------------------------------------
 sub main
 {
+    if ($#ARGV < 0)
+    {
+        die $USAGE . "\n";
+    }
+
+    my $localdisplay = "";
+
+    if (!GetOptions ('display:s' => \$localdisplay))
+    {
+        die "ERROR: bad options in command line\n" . "$USAGE\n";
+    }
+
     my $hostname = $ARGV [0];
     my $command  = $ARGV [1];
     my $members;
     my $port;
     my $path;
-    my $localdisplay;
 
     if (!defined ($hostname) || !defined ($command))
     {
@@ -159,7 +171,12 @@ sub main
     $exp = Expect->spawn("telnet $hostname")
         or die "Cannot spawn telnet: $!\n";
     telnetConnect ($host {$hostname} {'login'}, $host {$hostname} {'passwd'});
-    $localdisplay = lc ($ENV {'DISPLAY'});
+
+    if ($localdisplay eq "")
+    {
+        $localdisplay = lc ($ENV {'DISPLAY'});
+    }
+
     cmd ("export DISPLAY=$localdisplay\n");
     cmd ("$command &\n");
     cmd ("disown -h -ar \n");
