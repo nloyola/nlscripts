@@ -6,7 +6,7 @@ use strict;
 use File::Basename;
 use Getopt::Long;
 
-my $VERSION = '$Revision: 1.2 $';
+my $VERSION = '$Revision: 1.3 $';
 
 my $SCRIPTNAME = basename ($0);
 
@@ -103,17 +103,12 @@ sub main
         if ($op =~ /load average: ([\d\.]+)/)
         {
             $machine {$host} {'load'} = $1;
-
-            $machineByLoad {$1} {'host'}  = $host;
-            $machineByLoad {$1} {'ip'}    = $machine {$host} {'ip'};
-            $machineByLoad {$1} {'descr'} = $machine {$host} {'descr'};
-            $machineByLoad {$1} {'type'}  = $machine {$host} {'type'};
-            $machineByLoad {$1} {'user'}  = $machine {$host} {'user'};
         }
         else
         {
             $machine {$host} {'load'} = 'unknown';
         }
+        $machineByLoad {$1 . $host} = $host;
     }
 
     # output information sorted by load
@@ -121,37 +116,35 @@ sub main
     my $count = 0;
     foreach my $load (sort keys %machineByLoad)
     {
+        my $host = $machineByLoad {$load};
         if ($count < 4)
         {
-            push (@distcchosts, $machineByLoad {$load} {'host'});
+            push (@distcchosts, $host);
         }
 
         if ($distcc)
         {
-            my $op = `rsh $machineByLoad{$load}{'host'} /home/sw/bin/psgrep /distcc/`;
+            my $op = `rsh $host /home/sw/bin/psgrep /distcc/`;
             my @op = split (/\n/, $op);
             @op = grep (/\/home\/sw\/bin\/distcc/, @op);
 
             if ($#op + 1> 0)
             {
-                $machineByLoad {$load} {'distcc'} = "distcc";
-                my $host = $machineByLoad {$load} {'host'};
                 $machine {$host} {'distcc'} = "distcc";
             }
         }
 
         printf "%-10s %-6s %-18s %-7s",
-               $machineByLoad {$load} {'host'}, $load,
-               $machineByLoad {$load} {'type'};
+               $host, $machine {$host} {'load'}, $machine {$host} {'type'};
 
         if ($showUser)
         {
-            print $machineByLoad {$load} {'user'};
+            print $machine {$host} {'user'};
         }
 
         if ($distcc)
         {
-            printf " %-7s", $machineByLoad {$load}{'distcc'};
+            printf " %-7s", $machine {$host}{'distcc'};
         }
 
         $count++;

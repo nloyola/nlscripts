@@ -1,0 +1,28 @@
+#!/home/sw/bin/perl -w
+
+use Mail::POP3Client;
+my %pop3server;
+
+$pop3server {'dido'} {'user'} = 'nloyola';
+$pop3server {'dido'} {'pwd'} = '';
+
+$pop3server {'pop.mail.yahoo.com'} {'user'} = 'ne_loyola';
+$pop3server {'pop.mail.yahoo.com'} {'pwd'} = '';
+
+foreach my $server (sort (keys %pop3server))
+{
+    my $pop = new Mail::POP3Client (USER     => $pop3server {$server} {'user'},
+                                    PASSWORD => $pop3server {$server} {'pwd'},
+                                    HOST     => $server);
+
+    print $pop->Count() . " message(s) on " . $server . "\n";
+
+    for ($i = 1; $i <= $pop->Count(); $i++)
+    {
+        foreach ( $pop->Head( $i ) )
+        {
+            /^(From|Subject):\s+/i and print "  ", $_, "\n";
+        }
+        print "\n";
+    }
+}
