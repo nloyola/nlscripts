@@ -1,12 +1,16 @@
 #!/usr/bin/perl -w
 
 use strict;
+use Getopt::Std;
+
 my $USAGE = <<USAGE_END;
-Usage: $0
+Usage: $0 [-g GATEWAY_IP] ["VPN_NAME"]
 
   Used to connect to a VPN connection and configure routing tables
   accordingly.
 USAGE_END
+
+my %option;
 
 main ();
 
@@ -17,6 +21,8 @@ main ();
 #-----------------------------------------------------------------------------
 sub main
 {
+    getopts ('g:', \%option);
+
     my $connection = "Galazar T1";
     my $command;
 
@@ -27,20 +33,44 @@ sub main
 
     if (defined ($ARGV[0]))
     {
-        $connection = $ARGV [0];
+        $connection = $ARGV [0]
     }
 
     # dial the VPN connection
     $command = sprintf ("rasdial \"%s\" nloyola \"tb36>me\"", $connection);
     print $command, "\n";
-    `$command`;
+    my $op = `$command`;
+
+    if ($? != 0)
+    {
+        die $? . "\n" . $op;
+    }
 
     my $pppAdapterFound = 0;
-    my $gateway;
+    my $ethAdapterFound = 0;
+    my $defaultGateway;
+    my $vpnGateway;
+
     my @op = `ipconfig`;
+    #print @op;
     foreach (@op)
     {
         #print $_;
+        if (/Ethernet adapter/)
+        {
+            $ethAdapterFound = 1;
+        }
+
+        if (/Media Disconnected/)
+        {
+            $ethAdapterFound = 0;
+        }
+
+        if ($ethAdapterFound && (/Default Gateway[\s\.]+\s:\s([\d\.]+)/))
+        {
+            $defaultGateway = $1;
+        }
+
         if (/PPP adapter/)
         {
             $pppAdapterFound = 1;
@@ -48,17 +78,24 @@ sub main
 
         if ($pppAdapterFound && (/Default Gateway[\s\.]+\s:\s([\d\.]+)/))
         {
-            $gateway = $1;
+            $vpnGateway = $1;
         }
     }
 
-    if (defined ($gateway))
+    if (defined ($option{g}))
     {
-        print "gateway: ", $gateway, "\n";
+        $defaultGateway = $option {d};
+    }
+
+    if (defined ($vpnGateway))
+    {
+        print "default gateway: ", $defaultGateway, "\n",
+              "vpn gateway: ", $vpnGateway, "\n";
+
         `route delete 0.0.0.0`;
-        `route add 0.0.0.0 mask 0.0.0.0 192.168.2.1`;
-        `route add 192.168.1.0 mask 255.255.255.0 $gateway`;
-        `route add 192.168.3.0 mask 255.255.255.0 $gateway`;
+        `route add 0.0.0.0 mask 0.0.0.0 $defaultGateway`;
+        `route add 192.168.1.0 mask 255.255.255.0 $vpnGateway`;
+        `route add 192.168.3.0 mask 255.255.255.0 $vpnGateway`;
     }
 }
 

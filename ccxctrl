@@ -1,19 +1,32 @@
 #!/usr/bin/bash
 
-XBOXPATH="/c/xbox"
+XBOXPATH="/c/xbox/ccxstream-1.0.15-win"
 HOST="127.0.0.1"
 
 
 function ccxStart()
 {
-   $XBOXPATH/ccxstream.exe -L -l $HOST -f -r c:\\xbox\\media \
-       -S "Pictures2"="c:\Documents and Settings\Pabz\My Documents\My Pictures" \
-       -S "mp3_2"="c:\mp3"
+   #SHARES="-S \"Pictures\"=\"c:\\Documents and Settings\\All Users\\My Documents\\My Pictures\""
+
+   if [ -d "/cygdrive/z" ]; then
+       SHARES=$SHARES" -S Z=z:\\"
+   fi
+   SHARES=$SHARES" -S torrents=c:\\torrents"
+
+   echo "$SHARES"
+
+   $XBOXPATH/ccxstream.exe -L -l $HOST -f -r c:\\xbox $SHARES
 }
 
 function ccxStop()
 {
    echo `psk ccxstream`
+}
+
+function usage()
+{
+   echo "Usage: $0 { START | STOP | RESETART } [HOSTIP] "
+   exit 1;
 }
 
 
@@ -22,9 +35,8 @@ if [ ! -f "$XBOXPATH/ccxstream.exe" ]; then
    exit 1;
 fi
 
-if [ -z "$1" ]; then
-   echo "Usage: $0 { START | STOP | RESETART } [HOSTIP] "
-   exit 1;
+if [ "$1" == "" ]; then
+    usage
 fi
 
 if [ -n "$2" ]; then
@@ -33,13 +45,20 @@ fi
 
 if [ "$1" == "start" ]; then
     ccxStart
+   exit 0;
 fi
 
 if [ "$1" == "stop" ]; then
     ccxStop
+   exit 0;
 fi
 
 if [ "$1" == "restart" ]; then
     ccxStop
     ccxStart
+   exit 0;
 fi
+
+#usage
+
+
