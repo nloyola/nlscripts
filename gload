@@ -6,7 +6,7 @@ use strict;
 use File::Basename;
 use Getopt::Long;
 
-my $VERSION = '$Revision: 1.4 $';
+my $VERSION = '$Revision: 1.5 $';
 
 my $SCRIPTNAME = basename ($0);
 
@@ -26,6 +26,7 @@ USAGE_END
 
 my %machine;
 my %machineByLoad;
+my $myhostname;
 my $assignDHosts =  0;
 my $distcc =  0;
 my $helpShow;
@@ -72,6 +73,8 @@ sub main
     open (YP, "ypcat hosts.byaddr |")
         || die "ypcat failed!";
 
+    $myhostname = $ENV {'HOSTNAME'};
+
     while (<YP>)
     {
         my $line = $_;
@@ -79,6 +82,11 @@ sub main
 
         # look only for Blade 1000 machines
         if ($line !~ /B1000/) { next; }
+
+        # don't include machine this script is running on when assiging
+        # disctcc hosts
+        if ($assignDHosts && defined ($myhostname)
+            && ($line =~ /$myhostname/)) { next; }
 
         #print $line, "\n";
 
@@ -157,6 +165,11 @@ sub main
 
     if ($assignDHosts)
     {
+        if (! -d "$ENV{'HOME'}/.distcc")
+        {
+            `mkdir $ENV{'HOME'}/.distcc`;
+        }
+
         system ("echo \"$ip\" > $ENV{'HOME'}/.distcc/hosts");
     }
 
