@@ -1,0 +1,169 @@
+#!/usr/bin/perl -w
+
+#------------------------------------------------------------------------------
+#
+# Name: $Id: xcmd,v 1.1 2004/11/30 20:03:35 nloyola Exp $
+#
+# See $USAGE.
+#
+#------------------------------------------------------------------------------
+
+use strict;
+use Expect;
+
+#
+# Tell Perl where to find our module
+#
+#use lib "$ENV{'HOME'}/pl_scripts";
+
+my $USAGE = <<USAGE_END;
+Usage: $0 HOST COMMAND
+
+  Perl Expect script that starts a gnome-terminal on a remote machine.
+USAGE_END
+
+my $exp;
+my $spawnOk;
+
+my %host =
+    (
+     'obelix' =>
+     {
+      'login'  => 'nelson',
+      'passwd' => 'nelxrs24'
+     },
+     'cronus' =>
+     {
+      'login'  => 'nloyola',
+      'passwd' => 'nelxrs24'
+     },
+     'earth' =>
+     {
+      'login'  => 'nloyola',
+      'passwd' => 'nelxrs24'
+     }
+     );
+
+main ();
+
+
+#------------------------------------------------------------------------------
+#
+# Used to connect to the target. Ensures that we get a valid prompt.
+#
+#------------------------------------------------------------------------------
+sub telnetConnect
+{
+    my $login = shift;
+    my $passwd = shift;
+    my $connTimeout = 5;
+
+    my $stdOutLog = $exp->log_stdout ();
+    $exp->log_stdout (0); # suppress output
+
+    $exp->expect ($connTimeout,
+                  [
+                   qr'login: $',
+                   sub
+                   {
+                       $spawnOk = 1;
+                       my $fh = shift;
+                       $fh->send("$login\n");
+                       exp_continue;
+                   }
+                  ],
+                  [
+                   'Password: $',
+                   sub
+                   {
+                       my $fh = shift;
+                       print $fh "$passwd\n";
+                       exp_continue;
+                   }
+                  ],
+                  [
+                   eof =>
+                   sub
+                   {
+                       if ($spawnOk)
+                       {
+                           die "ERROR: premature EOF in login.\n";
+                       }
+                       else
+                       {
+                           die "ERROR: could not spawn telnet.\n";
+                       }
+                   }
+                  ],
+                  [
+                   timeout =>
+                   sub { die "No login.\n"; }
+                  ],
+                  '-re', qr/> $/, #' wait for shell prompt
+                 );
+    $exp->log_stdout ($stdOutLog); #restore the stdOut log
+}
+
+#------------------------------------------------------------------------------
+#
+# Used to send a command to the board. Can specify a command and an optional
+# timeout.
+#
+#------------------------------------------------------------------------------
+sub cmd
+{
+    my $command = shift;
+    my $timeout = shift;
+    my $result = 0;
+
+    if (! $spawnOk) { return; }
+
+    my $stdOutLog = $exp->log_stdout ();
+    $exp->log_stdout (0); # suppress output
+
+    $exp->send ("$command\n");
+    $exp->expect ($timeout,
+                  [
+                   timeout =>
+                   sub { die "no response.\n"; }
+                  ],
+                  '-re', qr/> $/, #' wait for shell prompt
+                 );
+    $exp->log_stdout ($stdOutLog); #restore the stdOut log
+    return $result;
+}
+
+#------------------------------------------------------------------------------
+#
+#
+#------------------------------------------------------------------------------
+sub main
+{
+    my $hostname = $ARGV [0];
+    my $command  = $ARGV [1];
+    my $members;
+    my $port;
+    my $path;
+    my $localdisplay;
+
+    if (!defined ($hostname) || !defined ($command))
+    {
+        die "$USAGE\n";
+    }
+
+    if (!defined ($host {$hostname}))
+    {
+        die "no login information for $hostname\n";
+    }
+
+    $exp = Expect->spawn("telnet $hostname")
+        or die "Cannot spawn telnet: $!\n";
+    telnetConnect ($host {$hostname} {'login'}, $host {$hostname} {'passwd'});
+    $localdisplay = lc ($ENV {'DISPLAY'});
+    cmd ("export DISPLAY=$localdisplay\n");
+    cmd ("$command &\n");
+    cmd ("disown -h -ar \n");
+
+    $exp->hard_close ();
+    print "\n";
+}
