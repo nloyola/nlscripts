@@ -4,18 +4,29 @@ use Mail::POP3Client;
 my %pop3server;
 
 $pop3server {'dido'} {'user'} = 'nloyola';
-$pop3server {'dido'} {'pwd'} = '';
+$pop3server {'dido'} {'pwd'} = '24nelxrs';
 
-$pop3server {'pop.mail.yahoo.com'} {'user'} = 'ne_loyola';
-$pop3server {'pop.mail.yahoo.com'} {'pwd'} = '';
+#$pop3server {'pop.mail.yahoo.com'} {'user'} = 'nloyola';
+#$pop3server {'pop.mail.yahoo.com'} {'pwd'} = '';
 
-foreach my $server (sort (keys %pop3server))
+$pop3server {'shawmail.ed.shawcable.net'} {'user'} = 'nloyola';
+$pop3server {'shawmail.ed.shawcable.net'} {'pwd'}  = 'nelxrs24';
+
+sub accountCheck
 {
-    my $pop = new Mail::POP3Client (USER     => $pop3server {$server} {'user'},
-                                    PASSWORD => $pop3server {$server} {'pwd'},
+    my $server = shift;
+    my $user   = shift;
+    my $pwd    = shift;
+
+    #print "server/", $server, " user/", $user, " pwd/", $pwd, "\n";
+
+    my $pop = new Mail::POP3Client (USER     => $user,
+                                    PASSWORD => $pwd,
                                     HOST     => $server);
 
     print $pop->Count() . " message(s) on " . $server . "\n";
+
+    if ($pop->Count() == -1) { return };
 
     for ($i = 1; $i <= $pop->Count(); $i++)
     {
@@ -24,5 +35,40 @@ foreach my $server (sort (keys %pop3server))
             /^(From|Subject):\s+/i and print "  ", $_, "\n";
         }
         print "\n";
+    }
+}
+
+sub accountsCheckAll
+{
+    foreach my $server (sort (keys %pop3server))
+    {
+        accountCheck ($server, $pop3server {$server} {'user'},
+                      $pop3server {$server} {'pwd'});
+    }
+}
+
+if ($#ARGV == -1)
+{
+    accountsCheckAll ();
+    exit;
+}
+
+#print $#ARGV, "\n";
+
+if (defined ($ARGV [0]))
+{
+    if ($ARGV [0] eq 'all')
+    {
+        accountsCheckAll ();
+    }
+    else
+    {
+        if (! defined ($pop3server {$ARGV [0]}))
+        {
+            die "no information for server ", $ARGV [0], "\n";
+        }
+
+        accountCheck ($ARGV[0], $pop3server {$ARGV[0]} {'user'},
+                      $pop3server {$ARGV[0]} {'pwd'});
     }
 }

@@ -17,7 +17,7 @@ main ();
 #-----------------------------------------------------------------------------
 sub main
 {
-    my $connection = 'Galazar T1';
+    my $connection = "Galazar T1";
     my $command;
 
     if ($#ARGV >= 1)
@@ -32,7 +32,7 @@ sub main
 
     # dial the VPN connection
     $command = sprintf ("rasdial \"%s\" nloyola \"tb36>me\"", $connection);
-    #print $command, "\n";
+    print $command, "\n";
     `$command`;
 
     my $pppAdapterFound = 0;
