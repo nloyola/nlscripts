@@ -17,6 +17,7 @@ Usage: $0 [OPTIONS] GENRE CDID
   CDmage.
 
   OPTIONS
+    -d    debug
     -s    Show freedb.org content.
     -h    Generates this text.
 HELP_END
@@ -41,15 +42,15 @@ foreach (@op)
         $fnameFormat = 'eac';
     }
 
-    if ($_ =~ /IMAGE track \d+ AUDIO-2352.wav/)
+    if ($_ =~ /image-track-\d+-AUDIO-2352.wav/)
     {
         $fnameFormat = 'cdmage';
     }
 }
 
-if ($fnameFormat eq "")
+if (! defined ($fnameFormat))
 {
-    die "ERROR: cannot find WAV files.s\n";
+    die "ERROR: cannot find WAV files.\n";
 }
 
 my $fdbgenre = $ARGV [0];
@@ -116,6 +117,9 @@ foreach $tname (@track_titles)
       if (! (-e $wavFname)) { next; }
       if (-e $mp3Fname) { next; }
 
+      $mp3Fname =~ s/\//-/g;
+      $mp3Fname =~ s/\?//g;
+
       if ($option{'d'})
       {
           print "lame $lame_opts $id3tags_static "
@@ -181,6 +185,6 @@ sub baseFnameGet
     }
     elsif ($fnameFormat eq 'cdmage')
     {
-        return sprintf ("IMAGE track %02d AUDIO-2352", $trackNum);
+        return sprintf ("image-track-%02d-AUDIO-2352", $trackNum);
     }
 }

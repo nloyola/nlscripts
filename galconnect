@@ -17,13 +17,23 @@ main ();
 #-----------------------------------------------------------------------------
 sub main
 {
-    if ($#ARGV >= 0)
+    my $connection = 'Galazar T1';
+    my $command;
+
+    if ($#ARGV >= 1)
     {
         die $USAGE, "\n";
     }
 
+    if (defined ($ARGV[0]))
+    {
+        $connection = $ARGV [0];
+    }
+
     # dial the VPN connection
-    `rasdial "Galazar T1" nloyola "tb36>me"`;
+    $command = sprintf ("rasdial \"%s\" nloyola \"tb36>me\"", $connection);
+    #print $command, "\n";
+    `$command`;
 
     my $pppAdapterFound = 0;
     my $gateway;
