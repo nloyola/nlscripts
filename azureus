@@ -1,5 +1,5 @@
 #!/usr/local/bin/bash
  
 cd /usr/local/installs/azureus
-./azureus &
+./azureus $@ &
 
