@@ -1,13 +1,41 @@
 #!/usr/bin/bash
 
-if [ ! -d oam/ocdt ]; then
-   echo oam/octf directory not found
+#-------------------------------------------------------------------------------
+#
+# $Id: ctf2unix,v 1.2 2004/07/20 17:24:19 nloyola Exp $
+#
+# Usage: ctf2unix
+#
+# Converts CTF files to unix. When compiling on CYGWIN the CTF files must first
+# be converted to unix format before ctf2cdt.pl can process them.
+#
+#-------------------------------------------------------------------------------
+
+
+dir="$P4DIR/proj/swae/oam/ocdt"
+if [ ! -d $dir ]; then
+   echo $dir not found
    exit 1
 fi
 
-cd oam/ocdt
-find . -name \*.ctf -exec chmod 644 {} \;
-find . -name \*.ctf -exec dos2unix {} \;
-find . -name \*.ctf -exec chmod 444 {} \;
+nonWriteable=""
+files=`find $dir -name \\*.ctf`
+
+for arg in $files
+do
+    if [ ! -w $arg ]; then
+        nonWriteable="$nonWriteable $arg"
+    fi
+done
+
+if [ -n "$nonWriteable" ]; then
+    chmod 644 $nonWriteable
+fi
+
+dos2unix $files 2> /dev/null
+
+if [ -n "$nonWriteable" ]; then
+    chmod 444 $nonWriteable
+fi
 
 exit 0
