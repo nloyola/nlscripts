@@ -1,4 +1,4 @@
-#!/usr/bin/perl -w
+#!/usr/local/bin/perl -w
 
 package main;
 
@@ -6,7 +6,7 @@ use strict;
 use File::Basename;
 use Getopt::Long;
 
-my $VERSION = '$Revision: 1.1 $';
+my $VERSION = '$Revision: 1.2 $';
 
 my $SCRIPTNAME = basename ($0);
 
@@ -23,7 +23,9 @@ Usage: $SCRIPTNAME [options]
 USAGE_END
 
 my %machine;
-my $debug;
+my %machineByLoad;
+my $assignDHosts =  0;
+my $distcc =  0;
 my $helpShow;
 my $showUser;
 
@@ -51,9 +53,10 @@ sub trim
 #------------------------------------------------------------------------------
 sub main
 {
-    if (!GetOptions ('debug' => \$debug,
-                     'help'  => \$helpShow,
-                     'users' => \$showUser))
+    if (!GetOptions ('assign' => \$assignDHosts,
+                     'distcc' => \$distcc,
+                     'help'   => \$helpShow,
+                     'users'  => \$showUser))
     {
         die "ERROR: bad options in command line\n";
     }
@@ -80,7 +83,8 @@ sub main
         # ypcat output uses tabs, so substr wont work
         if ($line =~ /^([\d\.]+)\s+(\w+)\s+#\s+(\S+)\s+(\S+)\s+(.+)/)
         {
-            if (defined ($1) && defined ($2))
+            if (defined ($1) && defined ($2) && defined ($3)
+                && defined ($4) && defined ($5))
             {
                 $machine {$2} {'ip'}    = $1;
                 $machine {$2} {'descr'} = $3;
@@ -99,6 +103,12 @@ sub main
         if ($op =~ /load average: ([\d\.]+)/)
         {
             $machine {$host} {'load'} = $1;
+
+            $machineByLoad {$1} {'host'}  = $host;
+            $machineByLoad {$1} {'ip'}    = $machine {$host} {'ip'};
+            $machineByLoad {$1} {'descr'} = $machine {$host} {'descr'};
+            $machineByLoad {$1} {'type'}  = $machine {$host} {'type'};
+            $machineByLoad {$1} {'user'}  = $machine {$host} {'user'};
         }
         else
         {
@@ -106,18 +116,55 @@ sub main
         }
     }
 
-    # print results
-    foreach my $host (sort keys %machine)
+    # output information sorted by load
+    my @distcchosts = ();
+    my $count = 0;
+    foreach my $load (sort keys %machineByLoad)
     {
+        if ($count < 4)
+        {
+            push (@distcchosts, $machineByLoad {$load} {'host'});
+        }
 
-        printf "%-10s %-6s %-18s",
-               $host, $machine {$host} {'load'}, $machine {$host} {'type'};
+        if ($distcc)
+        {
+            my $op = `rsh $machineByLoad{$load}{'host'} /home/sw/bin/psgrep /distcc/`;
+            my @op = split (/\n/, $op);
+            @op = grep (/\/home\/sw\/bin\/distcc/, @op);
+
+            if ($#op + 1> 0)
+            {
+                $machineByLoad {$load} {'distcc'} = "distcc";
+                my $host = $machineByLoad {$load} {'host'};
+                $machine {$host} {'distcc'} = "distcc";
+            }
+        }
+
+        printf "%-10s %-6s %-18s %-7s",
+               $machineByLoad {$load} {'host'}, $load,
+               $machineByLoad {$load} {'type'};
 
         if ($showUser)
         {
-            print $machine {$host} {'user'};
+            print $machineByLoad {$load} {'user'};
         }
 
+        if ($distcc)
+        {
+            printf " %-7s", $machineByLoad {$load}{'distcc'};
+        }
+
+        $count++;
         print "\n";
     }
+
+    my $ip = join (" ", @distcchosts);
+
+    if ($assignDHosts)
+    {
+        system ("echo \"$ip\" > $ENV{'HOME'}/.distcc/hosts");
+    }
+
+    print "\ndistcc hosts: ", $ip, "\n";
+
 }

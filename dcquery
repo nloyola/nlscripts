@@ -1,0 +1,14 @@
+#!/usr/local/bin/perl -w
+
+my @dcmachines = qw(athena atlas earth gallileo hubble mercury neptune venus);
+my $op;
+my @op;
+
+foreach (@dcmachines)
+{
+   $op = `rsh $_ psgrep /distcc/`;
+   @op = split (/\n/, $op);
+   @op = grep (/\/home\/sw\/bin\/distcc/, @op);
+
+   print $_, " distcc tasks running: ", $#op + 1, "\n";
+}
