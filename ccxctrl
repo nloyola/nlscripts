@@ -1,11 +1,33 @@
-#!/usr/bin/bash
+#!/usr/local/bin/bash
 
-XBOXPATH="/c/xbox/apps/ccxstream-1.0.15-win"
+if [ "$OSTYPE" == "cygwin" ]; then
+    XBOXPATH="/c/xbox/apps/ccxstream-1.0.15-win"
+fi
+
+if [ "$OSTYPE" == "linux-gnu" ]; then
+    XBOXPATH="/usr/local/bin"
+fi
 HOST="127.0.0.1"
-
 
 function ccxStart()
 {
+    if [ "$OSTYPE" == "cygwin" ]; then
+        ccxStartWindows
+    fi
+
+    if [ "$OSTYPE" == "linux-gnu" ]; then
+        ccxStartLinux
+    fi
+}
+
+
+function ccxStartWindows()
+{
+    if [ ! -f "$XBOXPATH/ccxstream.exe" ]; then
+    echo "ccxstream not found in $XBOXPATH"
+    exit 1;
+    fi
+
    SHARES="-S Pictures=c:\\Docume~1\\Alluse~1\Documents\\MyPict~1"
 
    if [ -d "/cygdrive/d" ]; then
@@ -25,6 +47,16 @@ function ccxStart()
    $XBOXPATH/ccxstream.exe -L -l $HOST -f -r c:\\xbox $SHARES
 }
 
+function ccxStartLinux()
+{
+    if [ ! -f "$XBOXPATH/ccxstream" ]; then
+        echo "ccxstream not found in $XBOXPATH"
+        exit 1;
+    fi
+
+   $XBOXPATH/ccxstream -L -l 192.168.2.3 -f -r /space/nelson/torrents -S games=/home/nelson/games
+}
+
 function ccxStop()
 {
    echo `psk ccxstream`
@@ -36,11 +68,6 @@ function usage()
    exit 1;
 }
 
-
-if [ ! -f "$XBOXPATH/ccxstream.exe" ]; then
-   echo "ccxstream not found in $XBOXPATH"
-   exit 1;
-fi
 
 if [ "$1" == "" ]; then
     usage

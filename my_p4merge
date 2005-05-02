@@ -1,4 +1,4 @@
-#!/usr/bin/sh
+#!/bin/sh
 SCRIPTNAME=`basename $0`
 if [ $# -lt 4 ]
 then
