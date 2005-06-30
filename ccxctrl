@@ -54,7 +54,10 @@ function ccxStartLinux()
         exit 1;
     fi
 
-   $XBOXPATH/ccxstream -L -l 192.168.2.3 -f -r /space/nelson/torrents -S games=/home/nelson/games
+    SHARES=""
+    SHARES=$SHARES" -S games=/home/nelson/games"
+
+   $XBOXPATH/ccxstream -L -l 192.168.2.3 -f -r /space/nelson/torrents $SHARES
 }
 
 function ccxStop()
