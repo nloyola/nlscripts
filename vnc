@@ -14,7 +14,7 @@ fi
 
 start ()
 {
-        /usr/bin/vncserver -name ${USER} -geometry $geom -depth 24 $session
+        /usr/bin/vncserver -name ${HOSTNAME} -geometry $geom -depth 24 $session
 }
 
 stop () {
