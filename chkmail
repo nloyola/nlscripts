@@ -1,4 +1,4 @@
-#!/home/sw/bin/perl -w
+#!/usr/bin/perl -w
 
 use Mail::POP3Client;
 

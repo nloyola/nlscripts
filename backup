@@ -1,23 +1,39 @@
-#!/usr/bin/tcsh
+#!/bin/sh
 
-if ($OSTYPE == "solaris") then
-  set TAR = /opt/gnu/bin/tar
-  set GZIP = /opt/gnu/bin/gzip
-endif
+# This script does personal backups to a rsync backup server. You will end up
+# with a 7 day rotating incremental backup. The incrementals will go
+# into subdirectories named after the day of the week, and the current
+# full backup goes into a directory called "current"
+# tridge@linuxcare.com
 
-if ($TERM == "cygwin") then
-  set TAR = /usr/bin/tar
-  set GZIP = /usr/bin/gzip
-endif
+# directory to backup
+BDIR="/c"
 
-cd $HOME
-$TAR cvf ~/config.tar .cshrc
-$TAR rvf ~/config.tar .mycshrc
-$TAR rvf ~/config.tar .myaliases
-$TAR rvf ~/config.tar -C /c/Documents\ and\ Settings/nelson My\ Documents/notes.txt
-$TAR rvf ~/config.tar -C /c bin/galroute.bat
-$TAR rvf ~/config.tar -C /c/WINDOWS/SYSTEM32/DRIVERS/ETC HOSTS
+# excludes file - this contains a wildcard pattern per line of files to exclude
+EXCLUDE=/home/nelson/backup/excludes
 
-$GZIP -f ~/config.tar
+# the name of the backup machine
+BSERVER=192.168.2.5
 
-unset TAR GZIP
+# your password on the backup server
+#export RSYNC_PASSWORD=
+
+
+########################################################################
+
+BACKUPDIR=`date +%A`
+OPTS="--force --ignore-errors --delete-excluded --exclude-from=$EXCLUDE
+      --delete --backup --backup-dir=/$BACKUPDIR -a"
+
+# uncomment for debugging
+#OPTS="-vv -n "$OPTS
+
+export PATH=$PATH:/bin:/usr/bin:/usr/local/bin
+
+# the following line clears the last weeks incremental directory
+[ -d $HOME/emptydir ] || mkdir $HOME/emptydir
+rsync --delete -a $HOME/emptydir/ $BSERVER::$USER/$BACKUPDIR/
+rmdir $HOME/emptydir
+
+# now the actual transfer
+rsync $OPTS "$BDIR" $BSERVER::$USER/current

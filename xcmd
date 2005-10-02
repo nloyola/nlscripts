@@ -2,7 +2,7 @@
 
 #------------------------------------------------------------------------------
 #
-# Name: $Id: xcmd,v 1.4 2004/12/09 17:58:18 nloyola Exp $
+# Name: $Id: xcmd,v 1.5 2005/10/02 23:58:39 nelson Exp $
 #
 # See $USAGE.
 #
@@ -33,26 +33,11 @@ my %host =
       'login'  => 'nelson',
       'passwd' => 'nelxrs24'
      },
-     'cronus' =>
+     'levante' =>
      {
-      'login'  => 'nloyola',
+      'login'  => 'nelson',
       'passwd' => 'nelxrs24'
      },
-     'earth' =>
-     {
-      'login'  => 'nloyola',
-      'passwd' => 'nelxrs24'
-     },
-     'silex' =>
-     {
-      'login'  => 'nloyola',
-      'passwd' => 'nelxrs24'
-     },
-     'gallileo' =>
-     {
-      'login'  => 'nloyola',
-      'passwd' => 'nelxrs24'
-     }
      );
 
 main ();
@@ -129,7 +114,7 @@ sub cmd
 
     if (!defined ($timeout))
     {
-        $timeout = 5;
+        $timeout = 15;
     }
 
     if (! $spawnOk) { return; }
@@ -234,7 +219,7 @@ sub main
     if ($shelltype =~ /bash/)
     {
         cmd ("export DISPLAY=$localdisplay\n");
-        cmd ("$command &\n");
+        cmd ("$command&\n");
         cmd ("disown -h -ar \n");
     }
     elsif ($shelltype =~ /tcsh/)

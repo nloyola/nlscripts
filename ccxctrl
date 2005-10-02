@@ -29,6 +29,7 @@ function ccxStartWindows()
     fi
 
    SHARES="-S Pictures=c:\\Docume~1\\Alluse~1\Documents\\MyPict~1"
+   SHARES=$SHARES" -S mp3=c:\\mp3"
 
    if [ -d "/cygdrive/d" ]; then
        SHARES=$SHARES" -S cdrom=d:\\"
