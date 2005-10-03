@@ -10,7 +10,7 @@
 BDIR="/c"
 
 # excludes file - this contains a wildcard pattern per line of files to exclude
-EXCLUDE=/home/nelson/backup/excludes
+EXCLUDE=/home/$USER/backup/excludes
 
 # the name of the backup machine
 BSERVER=192.168.2.5
@@ -32,7 +32,7 @@ export PATH=$PATH:/bin:/usr/bin:/usr/local/bin
 
 # the following line clears the last weeks incremental directory
 [ -d $HOME/emptydir ] || mkdir $HOME/emptydir
-rsync --delete -a $HOME/emptydir/ $BSERVER::$USER/$BACKUPDIR/
+rsync --delete -a $HOME/emptydir/ $BSERVER::$HOSTNAME/$BACKUPDIR/
 rmdir $HOME/emptydir
 
 # now the actual transfer
