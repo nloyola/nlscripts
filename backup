@@ -18,7 +18,6 @@ BSERVER=192.168.2.5
 # your password on the backup server
 #export RSYNC_PASSWORD=
 
-
 ########################################################################
 
 BACKUPDIR=`date +%A`
@@ -36,4 +35,4 @@ rsync --delete -a $HOME/emptydir/ $BSERVER::$HOSTNAME/$BACKUPDIR/
 rmdir $HOME/emptydir
 
 # now the actual transfer
-rsync $OPTS "$BDIR" $BSERVER::$USER/current
+rsync $OPTS "$BDIR" $BSERVER::$HOSTNAME/current
