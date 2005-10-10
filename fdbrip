@@ -196,7 +196,7 @@ sub baseFnameGet
     }
     elsif ($fnameFormat eq 'cdmage')
     {
-        return sprintf ("image-track-%02d-AUDIO-2352", $trackNum);
+        return sprintf ("image-track-%d-AUDIO-2352", $trackNum);
     }
     elsif ($fnameFormat eq 'grip')
     {
