@@ -1,0 +1,5 @@
+#!/usr/local/bin/bash
+
+cd ~/desktop
+find . -name \*.torrent -exec mv {} /cygdrive/t/.torrents \;
+

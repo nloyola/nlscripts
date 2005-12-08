@@ -21,11 +21,11 @@ BSERVER=192.168.2.5
 ########################################################################
 
 BACKUPDIR=`date +%A`
-OPTS="--force --ignore-errors --delete-excluded --exclude-from=$EXCLUDE
+OPTS="-vv --force --ignore-errors --delete-excluded --exclude-from=$EXCLUDE
       --delete --backup --backup-dir=/$BACKUPDIR -a"
 
 # uncomment for debugging
-#OPTS="-vv -n "$OPTS
+#OPTS="-n "$OPTS
 
 export PATH=$PATH:/bin:/usr/bin:/usr/local/bin
 
