@@ -1,4 +1,9 @@
 #!/usr/local/bin/bash
+#
+# startup script for ccxStream
+
+# Source function library.
+. /etc/rc.d/init.d/functions
 
 if [ "$OSTYPE" == "cygwin" ]; then
     XBOXPATH="/c/xbox/apps/ccxstream-1.0.15-win"

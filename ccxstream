@@ -1,0 +1,63 @@
+#!/bin/bash
+#
+# httpd        Startup script for ccxStream
+#
+# chkconfig: - 85 15
+# description: Startup script for ccxStream
+# processname: ccxstream
+
+# Source function library.
+. /etc/rc.d/init.d/functions
+
+# Path to the apachectl script, server binary, and short-form for messages.
+ccxstream=/usr/local/bin/ccxstream
+prog=ccxstream
+RETVAL=0
+
+if [ "$USER" == "nelson" ]; then
+    TORRENT_PATH="/space/nelson/torrents"
+    TORRENT_SHARES=$TORRENT_SHARES" -S games=/home/nelson/games"
+fi
+
+if [ "$USER" == "pabz" ]; then
+    TORRENT_PATH="/home/pabz/torrents"
+    #TORRENT_SHARES=$TORRENT_SHARES" -S games=/home/nelson/games"
+fi
+
+# The semantics of these two functions differ from the way apachectl does
+# things -- attempting to start while running is a failure, and shutdown
+# when not running is also a failure.  So we just do it the way init scripts
+# are expected to behave here.
+start() {
+        echo -n $"Starting $prog: "
+        $ccxstream -L -f -r $TORRENT_PATH $TORRENT_SHARES
+        RETVAL=$?
+        echo
+        return $RETVAL
+}
+stop() {
+	echo -n $"Stopping $prog: "
+	killproc $httpd
+	RETVAL=$?
+	echo
+	[ $RETVAL = 0 ] && rm -f ${lockfile} ${pidfile}
+}
+
+# See how we were called.
+case "$1" in
+  start)
+	start
+	;;
+  stop)
+	stop
+	;;
+  restart)
+	stop
+	start
+	;;
+  *)
+	echo $"Usage: $prog {start|stop|restart|}"
+	exit 1
+esac
+
+exit $RETVAL
