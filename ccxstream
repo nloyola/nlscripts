@@ -15,11 +15,13 @@ prog=ccxstream
 RETVAL=0
 
 if [ "$HOSTNAME" == "obelix" ]; then
+    IP="192.168.2.3"
     TORRENT_PATH="/space/nelson/torrents"
     TORRENT_SHARES=$TORRENT_SHARES" -S games=/home/nelson/games"
 fi
 
 if [ "$HOSTNAME" == "ichigo" ]; then
+    IP="192.168.1.2"
     TORRENT_PATH="/home/pabz/torrents"
     #TORRENT_SHARES=$TORRENT_SHARES" -S games=/home/nelson/games"
 fi
@@ -30,7 +32,7 @@ fi
 # are expected to behave here.
 start() {
         echo -n $"Starting $prog: "
-        $ccxstream -L -l 127.0.0.1 -f -r $TORRENT_PATH $TORRENT_SHARES
+        $ccxstream -L -l $IP -f -r $TORRENT_PATH $TORRENT_SHARES
         RETVAL=$?
         echo
         return $RETVAL
