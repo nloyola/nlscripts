@@ -14,12 +14,12 @@ ccxstream=/usr/local/bin/ccxstream
 prog=ccxstream
 RETVAL=0
 
-if [ "$USER" == "nelson" ]; then
+if [ "$HOSTNAME" == "obelix" ]; then
     TORRENT_PATH="/space/nelson/torrents"
     TORRENT_SHARES=$TORRENT_SHARES" -S games=/home/nelson/games"
 fi
 
-if [ "$USER" == "pabz" ]; then
+if [ "$HOSTNAME" == "ichigo" ]; then
     TORRENT_PATH="/home/pabz/torrents"
     #TORRENT_SHARES=$TORRENT_SHARES" -S games=/home/nelson/games"
 fi
@@ -30,14 +30,14 @@ fi
 # are expected to behave here.
 start() {
         echo -n $"Starting $prog: "
-        $ccxstream -L -f -r $TORRENT_PATH $TORRENT_SHARES
+        $ccxstream -L -l 127.0.0.1 -f -r $TORRENT_PATH $TORRENT_SHARES
         RETVAL=$?
         echo
         return $RETVAL
 }
 stop() {
 	echo -n $"Stopping $prog: "
-	killproc $httpd
+	killproc $ccxstream
 	RETVAL=$?
 	echo
 	[ $RETVAL = 0 ] && rm -f ${lockfile} ${pidfile}
