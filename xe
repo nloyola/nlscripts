@@ -1,9 +1,17 @@
-#!/usr/local/bin/bash
+#!/usr/bin/bash
 
-result=`(gnuclient -q $* &) 2>&1 | wc -l | sed 's/ //g'`
+if [ -f /usr/local/bin/xemacs ]; then
+    XEMACS_PATH=/usr/local/bin
+fi
+
+if [ -f $HOME/apps/bin/xemacs ]; then
+    XEMACS_PATH=$HOME/apps/bin
+fi
+
+result=`($XEMACS_PATH/gnuclient -q $* &) 2>&1 | wc -l | sed 's/ //g'`
 if [ "$result" != "0" ]; then
    # need to start XEmacs
-   /usr/local/bin/xemacs $* &
+   $XEMACS_PATH/xemacs $* &
 fi
 
 

@@ -3,9 +3,18 @@
 prog=$"VNC Server"
 geom="1024x768"
 
+if [ "$USER" == "loyola" ]; then
+    VNCSERVER="$HOME/apps/bin/vncserver"
+else
+    VNCSERVER="/usr/bin/vncserver"
+fi
+
 if [ ${USER} = "nelson" ]; then
     session=$":1"
     geom="1280x1024"
+elif [ ${USER} = "loyola" ]; then
+    session=$":1"
+    geom=1024x768
 elif [ ${USER} = "root" ]; then
     echo "Do not un VNC as root. *smack* bad user..." && exit 0
 else
@@ -14,11 +23,11 @@ fi
 
 start ()
 {
-        /usr/bin/vncserver -name ${HOSTNAME} -geometry $geom -depth 24 $session
+        $VNCSERVER -name ${HOSTNAME} -geometry $geom -depth 24 $session
 }
 
 stop () {
-        /usr/bin/vncserver -kill $session
+        $VNCSERVER -kill $session
 }
 
 case $1 in
