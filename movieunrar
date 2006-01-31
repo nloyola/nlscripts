@@ -1,0 +1,100 @@
+#!/usr/bin/perl -w
+
+use File::Find;
+use Getopt::Long;
+use File::Basename;
+
+my $USAGE = <<USAGE_END;
+Usage: $0 [options]
+
+  Searches for RAR files in a directory tree and uncompresses them.
+
+  OPTIONS
+  -q          query rar files only.
+USAGE_END
+
+my %rarDirs;
+my $queryOnly = 0;
+
+main ();
+
+#-----------------------------------------------------------------------------
+#  processFile
+#
+#-----------------------------------------------------------------------------
+sub processFile
+{
+    # only process files
+    if (!-f $_) { return; }
+
+    my ($basename, $path);
+    my $fname = $_;
+
+    if (($fname =~ /\.rar$/)
+        && ($File::Find::name !~ /\/SW\//)
+        && ($File::Find::name !~ /\/xbox\//)
+        && ($File::Find::name !~ /\/CAILLOU\//))
+    {
+        ($basename, $path) = fileparse ($File::Find::name);
+
+        #print $File::Find::name3 . ": " . $path . "/" . $basename . "\n";
+
+        push (@{ $rarDirs{$path} }, $basename);
+    }
+
+    #$File::Find::prune = 0;
+}
+
+#-----------------------------------------------------------------------------
+# main
+#
+# Iterate through all sub-directories
+#-----------------------------------------------------------------------------
+sub main
+{
+    if (!GetOptions ('query' => \$queryOnly))
+    {
+        die "ERROR: bad options in command line\n";
+    }
+
+    #if ($#ARGV < 1)
+    #{
+    #    die "$USAGE\n";
+    #}
+
+    File::Find::find ( {wanted => \&processFile}, '.');
+
+    if ($queryOnly)
+    {
+        foreach my $dir (keys %rarDirs)
+        {
+            foreach my $file (@{ $rarDirs {$dir} })
+            {
+                print $dir . $file . "\n";
+            }
+        }
+        return;
+    }
+
+    foreach my $dir (keys %rarDirs)
+    {
+        my @files = @{ $rarDirs {$dir} };
+
+        if ($#files == 0)
+        {
+            print "Extracting: " . $dir . $files[0] . "\n";
+            my $cmd = "cd \"" . $dir . "\" && /usr/bin/unrar e " . $files[0];
+            my $op = `$cmd`;
+
+            #print $cmd . "\n";
+        }
+        else
+        {
+            print "Directory " . $dir . "has multiple rar files\n";
+        }
+    }
+}
+
+
+1;
+

@@ -61,9 +61,16 @@ function ccxStartLinux()
     fi
 
     SHARES=""
-    SHARES=$SHARES" -S games=/home/nelson/games"
+    if [ "$HOSTNAME" == "obelix" ]; then
+        ROOT=/space/nelson/torrents
+        SHARES=$SHARES" -S games=/home/nelson/games"
+    fi
 
-   $XBOXPATH/ccxstream -L -l 192.168.2.3 -f -r /space/nelson/torrents $SHARES
+    if [ "$HOSTNAME" == "levante" ]; then
+        ROOT=/home/nelson/Desktop/toburn
+    fi
+
+    $XBOXPATH/ccxstream -L -f -r $ROOT $SHARES
 }
 
 function ccxStop()
