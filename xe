@@ -1,12 +1,22 @@
 #!/bin/bash
 
+if [ -f $HOME/apps/bin/xemacs ]; then
+    XEMACS_PATH=$HOME/apps/bin
+fi
+
+if [ -f /usr/bin/xemacs ]; then
+    XEMACS_PATH=/usr/bin
+fi
+
 if [ -f /usr/local/bin/xemacs ]; then
     XEMACS_PATH=/usr/local/bin
 fi
 
-if [ -f $HOME/apps/bin/xemacs ]; then
-    XEMACS_PATH=$HOME/apps/bin
+if [ "$XEMACS_PATH" == "" ]; then
+    echo "No path to XEmacs"
+    exit
 fi
+
 
 result=`($XEMACS_PATH/gnuclient -q $* &) 2>&1 | wc -l | sed 's/ //g'`
 if [ "$result" != "0" ]; then

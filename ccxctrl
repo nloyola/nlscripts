@@ -2,14 +2,14 @@
 #
 # startup script for ccxStream
 
-# Source function library.
-. /etc/rc.d/init.d/functions
-
 if [ "$OSTYPE" == "cygwin" ]; then
     XBOXPATH="/c/xbox/apps/ccxstream-1.0.15-win"
 fi
 
 if [ "$OSTYPE" == "linux-gnu" ]; then
+    # Source function library.
+    . /etc/rc.d/init.d/functions
+
     XBOXPATH="/usr/local/bin"
 fi
 HOST="127.0.0.1"
