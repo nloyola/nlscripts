@@ -22,8 +22,7 @@ main ();
 #  processFile
 #
 #-----------------------------------------------------------------------------
-sub processFile
-{
+sub processFile {
     # only process files
     if (!-f $_) { return; }
 
@@ -31,10 +30,12 @@ sub processFile
     my $fname = $_;
 
     if (($fname =~ /\.rar$/)
+        && ($File::Find::name !~ /\/\.torrents\//)
+        && ($File::Find::name !~ /Books\//)
+        && ($File::Find::name !~ /\/Music\//)
         && ($File::Find::name !~ /\/SW\//)
         && ($File::Find::name !~ /\/xbox\//)
-        && ($File::Find::name !~ /\/CAILLOU\//))
-    {
+        && ($File::Find::name !~ /\/CAILLOU\//)) {
         ($basename, $path) = fileparse ($File::Find::name);
 
         #print $File::Find::name3 . ": " . $path . "/" . $basename . "\n";
@@ -50,10 +51,40 @@ sub processFile
 #
 # Iterate through all sub-directories
 #-----------------------------------------------------------------------------
-sub main
-{
-    if (!GetOptions ('query' => \$queryOnly))
-    {
+sub unrarFile {
+    my $dir = shift;
+    my $file = shift;
+
+    if (!defined($dir) || !defined($file)) { return; }
+
+    my $cmd = "cd \"" . $dir . "\" && nice /usr/bin/unrar e " . $file;
+
+    # add error processing as above
+    die "cannot fork: $!" unless defined($pid = open(KID_TO_READ, "-|"));
+
+    if ($pid) {
+        # parent
+        while (<KID_TO_READ>) {
+            chomp;
+            if (($_ =~ /^Extracting/) || ($_ =~ /^ALL OK/)) {
+                print $_ . "\n";
+            }
+        }
+        close(KID_TO_READ) or warn "kid exited $?";
+
+    } else {
+        # child
+        exec($cmd)  or die "can't exec program: $!";
+    }
+}
+
+#-----------------------------------------------------------------------------
+# main
+#
+# Iterate through all sub-directories
+#-----------------------------------------------------------------------------
+sub main {
+    if (!GetOptions ('query' => \$queryOnly)) {
         die "ERROR: bad options in command line\n";
     }
 
@@ -62,35 +93,37 @@ sub main
     #    die "$USAGE\n";
     #}
 
+    my ($dir, $file);
     File::Find::find ( {wanted => \&processFile}, '.');
 
-    if ($queryOnly)
-    {
-        foreach my $dir (keys %rarDirs)
-        {
-            foreach my $file (@{ $rarDirs {$dir} })
-            {
+    if ($queryOnly) {
+        foreach $dir (keys %rarDirs) {
+            foreach $file (@{ $rarDirs {$dir} }) {
                 print $dir . $file . "\n";
             }
         }
         return;
     }
 
-    foreach my $dir (keys %rarDirs)
-    {
+    foreach $dir (keys %rarDirs) {
         my @files = @{ $rarDirs {$dir} };
 
-        if ($#files == 0)
-        {
+        if ($#files == 0) {
             print "Extracting: " . $dir . $files[0] . "\n";
-            my $cmd = "cd \"" . $dir . "\" && /usr/bin/unrar e " . $files[0];
-            my $op = `$cmd`;
-
-            #print $cmd . "\n";
+            unrarFile ($dir, $files[0]);
         }
-        else
-        {
-            print "Directory " . $dir . "has multiple rar files\n";
+        else {
+            my @part01 = grep (/\.part01\.rar$/, @files);
+            if ($#part01 == 0) {
+                foreach $file (@part01) {
+                    print "Extracting: " . $dir . $files[0] . "\n";
+                    unrarFile ($dir, $part01[0]);
+                }
+            }
+            else {
+                print "Cannot handle multiples RAR files in Directory "
+                    . $dir . "\n";
+            }
         }
     }
 }
