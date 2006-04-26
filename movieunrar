@@ -35,7 +35,9 @@ sub processFile {
         && ($File::Find::name !~ /\/Music\//)
         && ($File::Find::name !~ /\/SW\//)
         && ($File::Find::name !~ /\/xbox\//)
-        && ($File::Find::name !~ /\/CAILLOU\//)) {
+        && ($File::Find::name !~ /\/XBOX\//)
+        && ($File::Find::name !~ /\/CAILLOU\//))
+    {
         ($basename, $path) = fileparse ($File::Find::name);
 
         #print $File::Find::name3 . ": " . $path . "/" . $basename . "\n";

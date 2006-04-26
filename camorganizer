@@ -1,0 +1,109 @@
+#!/usr/bin/perl -w
+
+use File::Find;
+use Getopt::Long;
+use File::Basename;
+use File::stat qw(:FIELDS);
+
+my $USAGE = <<USAGE_END;
+Usage: $0 [options]
+
+  Organizes camera files.
+
+  OPTIONS
+  -q          query rar files only.
+USAGE_END
+
+my %fileinfoHash;
+my %fileSizeHash;
+my $queryOnly = 0;
+
+main ();
+
+#-----------------------------------------------------------------------------
+#  processFile
+#
+#-----------------------------------------------------------------------------
+sub processFile
+{
+    # only process files
+    if (!-f $_) { return; }
+
+    my $fname = $_;
+
+    if (($fname =~ /\.jpg$/) || ($fname =~ /\.avi$/))
+    {
+        my ($basename, $path) = fileparse ($File::Find::name);
+
+        #print $fname . ": " . $File::Find::name . ": " . $path . $basename . "\n";
+
+        if (exists $fileinfoHash{$basename})
+        {
+            my @fileinfo = @{ $fileinfoHash {$basename} };
+            print "duplicate file name found: file " . $basename
+                . " " . $fileinfo[0] . " and " . $path . "\n";
+        }
+        else
+        {
+            my $st = stat($fname);
+            push (@{ $fileinfoHash{$basename} }, ($File::Find::name,
+                                                  $st->size));
+        }
+    }
+
+    #$File::Find::prune = 0;
+}
+
+#-----------------------------------------------------------------------------
+# main
+#
+# Iterate through all sub-directories
+#-----------------------------------------------------------------------------
+sub main
+{
+    if (!GetOptions ('query' => \$queryOnly))
+    {
+        die "ERROR: bad options in command line\n";
+    }
+
+    #if ($#ARGV < 1)
+    #{
+    #    die "$USAGE\n";
+    #}
+
+    File::Find::find ( {wanted => \&processFile}, '.');
+
+    if ($queryOnly)
+    {
+        foreach my $name (keys %fileinfoHash)
+        {
+            my @fileinfo = @{ $fileinfoHash {$name} };
+            print $name;
+            foreach my $info (@fileinfo)
+            {
+                print $info;
+            }
+            print "\n";
+        }
+        return;
+    }
+
+    # check file sizes
+    foreach my $name (keys %fileinfoHash)
+    {
+        my @fileinfo = @{ $fileinfoHash {$name} };
+
+        if (exists $fileSizeHash{$fileinfo[1]})
+        {
+            print "files have same size: " . $fileinfo[0] . " "
+                . ${ $fileSizeHash{$fileinfo[1]} }[0] . "\n";
+        }
+        else
+        {
+            push (@{ $fileSizeHash{$fileinfo[1]} }, $fileinfo[0]);
+        }
+    }
+}
+
+1;
+

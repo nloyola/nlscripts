@@ -1,0 +1,128 @@
+#!/usr/bin/perl -w
+
+use File::Find;
+use Getopt::Long;
+use File::Basename;
+
+use Image::ExifTool;
+
+my %files;
+my $queryOnly = 0;
+#my @ioTagList = qw(filename imagesize xmp:creator exif:* -ifd1:*);
+my @ioTagList = qw(DateTimeOriginal);
+
+main ();
+
+#-----------------------------------------------------------------------------
+#
+#
+#-----------------------------------------------------------------------------
+sub debug {
+    my $exifInfo = shift;
+    foreach (keys %$exifInfo) {
+        print "$_ : $exifInfo->{$_}\n";
+    }
+}
+
+#-----------------------------------------------------------------------------
+#
+#
+#-----------------------------------------------------------------------------
+sub processFile {
+    # only process files
+    if (!-f $_) { return; }
+
+    my $fname = $_;
+    my $basename;
+    my $path;
+    my $thmFile;
+
+    if (($fname =~ /\.jpg$/) || ($fname =~ /\.avi$/)) {
+        ($basename, $path) = fileparse ($File::Find::name);
+        push (@{ $files{$path . $basename} }, $basename);
+        push (@{ $files{$path . $basename} }, $path);
+
+        if ($fname =~ /\.avi$/) {
+            ($thmFile = $path . $basename) =~ s/\.avi$/\.THM/;
+            if (-e $thmFile) {
+                push (@{ $files{$path . $basename} }, $thmFile);
+            }
+        }
+    }
+}
+
+#-----------------------------------------------------------------------------
+#
+#
+#-----------------------------------------------------------------------------
+sub main {
+    if (!GetOptions ('query' => \$queryOnly)) {
+        die "ERROR: bad options in command line\n";
+    }
+
+    my $exifTool = new Image::ExifTool;
+    $exifTool->Options(Unknown => 1, DateFormat => '%G%m%d-%H%M%S');
+
+    File::Find::find ( {wanted => \&processFile}, '.');
+
+    if ($queryOnly) {
+        foreach my $key (keys %files) {
+            my $basename = @ {$files{$key}} [0];
+            my $path = @ {$files{$key}} [1];
+            my $thmFile = @ {$files{$key}} [2];
+            my $info;
+
+            print $basename, " -> ";
+
+            if ($basename =~ /\.jpg$/) {
+                $info = $exifTool->ImageInfo($path . $basename, \@ioTagList);
+            }
+            elsif ($basename =~ /\.avi$/) {
+                if (defined ($thmFile)) {
+                    # get date and time info from THM file
+                    $info = $exifTool->ImageInfo($thmFile, \@ioTagList);
+                }
+                else {
+                    print "*** Missing THM file";
+                }
+            }
+
+            if (defined($info->{'DateTimeOriginal'})) {
+                print $info->{'DateTimeOriginal'};
+            }
+            print"\n";
+        }
+        return;
+    }
+
+    foreach my $key (keys %files) {
+        my $basename = @ {$files{$key}} [0];
+        my $path = @ {$files{$key}} [1];
+        my $thmFile = @ {$files{$key}} [2];
+        my $newName = "";
+        my $info;
+
+        if ($basename =~ /\.jpg$/) {
+            $info = $exifTool->ImageInfo($path . $basename, \@ioTagList);
+            if (defined($info->{'DateTimeOriginal'})) {
+                $newName = $info->{'DateTimeOriginal'} . ".jpg";
+            }
+        }
+        elsif ($basename =~ /\.avi$/) {
+            if (defined ($thmFile)) {
+                # get date and time info from THM file
+                $info = $exifTool->ImageInfo($thmFile, \@ioTagList);
+                if (defined($info->{'DateTimeOriginal'})) {
+                    $newName = $info->{'DateTimeOriginal'} . ".avi";
+                }
+            }
+        }
+
+        if ($newName ne "") {
+            rename($key, $path . $newName);
+            if ($newName =~ /\.avi$/) {
+                rename($thmFile, $path . $newName . ".THM");
+            }
+        }
+    }
+}
