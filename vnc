@@ -3,21 +3,22 @@
 prog=$"VNC Server"
 geom="1024x768"
 
-if [ "$HOSTNAME" == "uk0*" ]; then
+if [ "$USER" == "loyola" ]; then
     VNCSERVER="$HOME/apps/bin/vncserver"
 else
     VNCSERVER="/usr/bin/vncserver"
 fi
 
-session=$":1"
-geom="1280x1024"
-
-#if [ "$HOSTNAME" == "uk0*" -o "$HOSTNAME" == "amber-rv" ]; then
-#    geom=1024x768
-#fi
-
-if [ ${USER} = "root" ]; then
+if [ ${USER} = "nelson" ]; then
+    session=$":1"
+    geom="1280x1024"
+elif [ ${USER} = "loyola" ]; then
+    session=$":1"
+    geom=1024x768
+elif [ ${USER} = "root" ]; then
     echo "Do not un VNC as root. *smack* bad user..." && exit 0
+else
+    echo $"${USER} does not have a valid VNC account." && exit
 fi
 
 start ()

@@ -2,7 +2,7 @@
 
 #------------------------------------------------------------------------------
 #
-# Name: $Id: xcmd,v 1.7 2006/04/26 20:16:46 nelson Exp $
+# Name: $Id: xcmd,v 1.8 2006/10/08 18:35:26 nelson Exp $
 #
 # See $USAGE.
 #
@@ -128,7 +128,7 @@ sub cmd
                    timeout =>
                    sub { die "no response.\n"; }
                   ],
-                  '-re', qr/> *$/, #' wait for shell prompt
+                  '-re', qr/> ?$/, #' wait for shell prompt
                  );
     $exp->log_stdout ($stdOutLog); #restore the stdOut log
     return $result;
