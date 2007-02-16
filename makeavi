@@ -1,0 +1,19 @@
+#!/bin/bash
+
+AUDIO_BITRATE="128"
+VIDEO_BITRATE="1150"
+
+LAME_OPTS=br="$AUDIO_BITRATE:cbr:aq=0"
+#XVID_OPTS="bitrate=$VIDEO_BITRATE:vhq=4"
+XVID_OPTS="bitrate=$VIDEO_BITRATE:chroma_opt:vhq=4:bvhq=1:quant_type=mpeg"
+
+LAME="-oac mp3lame -lameopts $LAME_OPTS"
+XVID="-ovc xvid -xvidencopts $XVID_OPTS"
+
+MSG_LEVEL="-msglevel all=5"
+
+rm divx2pass.log
+
+mencoder $1 $LAME $XVID:pass=1 -o nul $MSG_LEVEL
+mencoder $1 $LAME $XVID:pass=2 -o $2 $MSG_LEVEL
+
