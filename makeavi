@@ -1,5 +1,10 @@
 #!/bin/bash
 
+if [ "$1" == "" -o "$2" == "" ]; then
+    echo "usage: $0 in_file out_file]"
+    exit
+fi
+
 AUDIO_BITRATE="128"
 VIDEO_BITRATE="1150"
 
@@ -7,13 +12,17 @@ LAME_OPTS=br="$AUDIO_BITRATE:cbr:aq=0"
 #XVID_OPTS="bitrate=$VIDEO_BITRATE:vhq=4"
 XVID_OPTS="bitrate=$VIDEO_BITRATE:chroma_opt:vhq=4:bvhq=1:quant_type=mpeg"
 
-LAME="-oac mp3lame -lameopts $LAME_OPTS"
-XVID="-ovc xvid -xvidencopts $XVID_OPTS"
+LAME="-oac mp3lame -lameopts $LAME_OPTS -srate 8000"
+XVID="-ovc xvid -xvidencopts $XVID_OPTS -vf pp=lb"
 
 MSG_LEVEL="-msglevel all=5"
 
-rm divx2pass.log
+if [ -f divx2pass.log ];  then
+        rm divx2pass.log
+fi
 
-mencoder $1 $LAME $XVID:pass=1 -o nul $MSG_LEVEL
+mencoder $1 -noskip -mc 0 $LAME $XVID:pass=1 -o nul $MSG_LEVEL
 mencoder $1 $LAME $XVID:pass=2 -o $2 $MSG_LEVEL
 
+# encode into flash video
+# mencoder orig_file.ext -ofps 25 -o dest_file.flv -of lavf -oac mp3lame -lameopts abr:br=64 -srate 22050 -ovc lavc -lavfopts i_certify_that_my_video_stream_does_not_use_b_frames -lavcopts vcodec=flv:keyint=50:vbitrate=300:mbd=2:mv0:trell:v4mv:cbp:last_pred=3 -vop scale=320:240

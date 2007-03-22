@@ -1,0 +1,18 @@
+#!/usr/bin/perl
+
+unless (@ARGV) {
+   die "usage: $0 mp3file [ mp3file ... ]\n";
+}
+
+@quotedfiles = map { qq("$_") } @ARGV;
+
+$listout = `mp3gain -o @quotedfiles`;
+
+($albumgain) = ($listout =~ /^"Album"\s+(\S+)/m);
+
+print "Will attempt to apply MP3 gain of $albumgain\n";
+
+for $file (@quotedfiles) {
+   $stdout = `mp3gain -g $albumgain $file`;  
+}
+

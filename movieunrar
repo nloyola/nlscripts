@@ -31,11 +31,8 @@ sub processFile {
 
     if (($fname =~ /\.rar$/)
         && ($File::Find::name !~ /\/\.torrents\//)
-        && ($File::Find::name !~ /Books\//)
-        && ($File::Find::name !~ /\/Music\//)
-        && ($File::Find::name !~ /\/SW\//)
-        && ($File::Find::name !~ /\/xbox\//)
-        && ($File::Find::name !~ /\/CAILLOU\//)) {
+        && ($File::Find::name !~ /\/other\//)
+        && ($File::Find::name !~ /\/tv\//)) {
         ($basename, $path) = fileparse ($File::Find::name);
 
         #print $File::Find::name3 . ": " . $path . "/" . $basename . "\n";
@@ -79,23 +76,11 @@ sub unrarFile {
     }
 }
 
-#-----------------------------------------------------------------------------
-# main
-#
-# Iterate through all sub-directories
-#-----------------------------------------------------------------------------
-sub main {
-    if (!GetOptions ('query' => \$queryOnly)) {
-        die "ERROR: bad options in command line\n";
-    }
+sub unrarDir {
+    my $dir = shift;
+    my $file;
 
-    #if ($#ARGV < 1)
-    #{
-    #    die "$USAGE\n";
-    #}
-
-    my ($dir, $file);
-    File::Find::find ( {wanted => \&processFile}, '.');
+    File::Find::find ( {wanted => \&processFile}, $dir);
 
     if ($queryOnly) {
         foreach $dir (keys %rarDirs) {
@@ -127,6 +112,43 @@ sub main {
             }
         }
     }
+}
+
+#-----------------------------------------------------------------------------
+# main
+#
+# Iterate through all sub-directories
+#-----------------------------------------------------------------------------
+sub main {
+    if (!GetOptions ('query' => \$queryOnly)) {
+        die "ERROR: bad options in command line\n";
+    }
+
+    # check if directories were specified in the command line
+    if ($#ARGV >= 0) {
+        foreach $dir (@ARGV) {
+            opendir(D, $dir);
+            my @f = readdir(D);
+            closedir(D);
+
+            my @rar = grep(/rar/, @f);
+            my @r00 = grep(/r00/, @f);
+            my @cd = grep(/(cd|CD)\d/, @f);
+
+            if ($#rar >= 0) {
+                unrarFile ($dir, $rar[0]);
+            }
+            elsif ($#r00 >= 0) {
+                unrarFile ($dir, $r00[0]);
+            }
+            elsif ($#cd >= 0) {
+                unrarDir($dir);
+            }
+        }
+        return;
+    }
+
+    unrarDir('.');
 }
 
 

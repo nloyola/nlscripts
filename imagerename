@@ -3,8 +3,9 @@
 use File::Find;
 use Getopt::Long;
 use File::Basename;
-
 use Image::ExifTool;
+use Image::ExifTool::RIFF;
+
 
 my %files;
 my $queryOnly = 0;
@@ -41,13 +42,6 @@ sub processFile {
         ($basename, $path) = fileparse ($File::Find::name);
         push (@{ $files{$path . $basename} }, $basename);
         push (@{ $files{$path . $basename} }, $path);
-
-        if ($fname =~ /\.avi$/) {
-            ($thmFile = $path . $basename) =~ s/\.avi$/\.THM/;
-            if (-e $thmFile) {
-                push (@{ $files{$path . $basename} }, $thmFile);
-            }
-        }
     }
 }
 
@@ -74,17 +68,11 @@ sub main {
 
             print $basename, " -> ";
 
-            if ($basename =~ /\.jpg$/) {
-                $info = $exifTool->ImageInfo($path . $basename, \@ioTagList);
-            }
-            elsif ($basename =~ /\.avi$/) {
-                if (defined ($thmFile)) {
-                    # get date and time info from THM file
-                    $info = $exifTool->ImageInfo($thmFile, \@ioTagList);
-                }
-                else {
-                    print "*** Missing THM file";
-                }
+            $info = $exifTool->ImageInfo($path . $basename, \@ioTagList);
+
+            if (defined ($thmFile)) {
+                # get date and time info from THM file
+                $info = $exifTool->ImageInfo($thmFile, \@ioTagList);
             }
 
             if (defined($info->{'DateTimeOriginal'})) {
@@ -101,26 +89,23 @@ sub main {
         my $thmFile = @ {$files{$key}} [2];
         my $newName = "";
         my $info;
+        my $type;
 
         if ($basename =~ /\.jpg$/) {
-            $info = $exifTool->ImageInfo($path . $basename, \@ioTagList);
-            if (defined($info->{'DateTimeOriginal'})) {
-                $newName = $info->{'DateTimeOriginal'} . ".jpg";
-            }
+            $type = '.jpg';
         }
         elsif ($basename =~ /\.avi$/) {
-            if (defined ($thmFile)) {
-                # get date and time info from THM file
-                $info = $exifTool->ImageInfo($thmFile, \@ioTagList);
-                if (defined($info->{'DateTimeOriginal'})) {
-                    $newName = $info->{'DateTimeOriginal'} . ".avi";
-                }
-            }
+            $type = '.avi';
+        }
+
+        $info = $exifTool->ImageInfo($path . $basename, \@ioTagList);
+        if (defined($info->{'DateTimeOriginal'})) {
+            $newName = $info->{'DateTimeOriginal'} . $type;
         }
 
         if ($newName ne "") {
             rename($key, $path . $newName);
-            if ($newName =~ /\.avi$/) {
+            if (($newName =~ /\.avi$/) && (defined $thmFile)) {
                 rename($thmFile, $path . $newName . ".THM");
             }
         }
