@@ -1,28 +1,74 @@
 #!/bin/bash
 
-if [ "$1" == "" -o "$2" == "" ]; then
-    echo "usage: $0 in_file out_file]"
+usage="usage: $0 in_file"
+
+if [ "$1" == "" ]; then
+    echo $usage;
     exit
 fi
 
-AUDIO_BITRATE="128"
-VIDEO_BITRATE="1150"
+while getopts ":c" options; do
+  case $options in
+    c ) canon=1;;
+    \? ) echo $usage
+         exit 1;;
+    * ) echo $usage
+          exit 1;;
 
-LAME_OPTS=br="$AUDIO_BITRATE:cbr:aq=0"
-#XVID_OPTS="bitrate=$VIDEO_BITRATE:vhq=4"
-XVID_OPTS="bitrate=$VIDEO_BITRATE:chroma_opt:vhq=4:bvhq=1:quant_type=mpeg"
+  esac
+done
 
-LAME="-oac mp3lame -lameopts $LAME_OPTS -srate 8000"
-XVID="-ovc xvid -xvidencopts $XVID_OPTS -vf pp=lb"
+shift $(($OPTIND - 1))
 
-MSG_LEVEL="-msglevel all=5"
+ext=${1##*.}
 
-if [ -f divx2pass.log ];  then
-        rm divx2pass.log
+if [ "$ext" != "avi" ]; then
+    echo "$1 is not an avi file"
+    exit
 fi
 
-mencoder $1 -noskip -mc 0 $LAME $XVID:pass=1 -o nul $MSG_LEVEL
-mencoder $1 $LAME $XVID:pass=2 -o $2 $MSG_LEVEL
+outfile="${1##*/}"
+outfile="${1%%.*}-xvid.avi"
+
+
+MSG_LEVEL="-msglevel all=5"
+VIDEO_BITRATE="1150"
+# XVID_OPTS="bitrate=$VIDEO_BITRATE:vhq=4"
+XVID_OPTS="bitrate=$VIDEO_BITRATE:chroma_opt:vhq=4:bvhq=1:quant_type=mpeg"
+XVID="-ovc xvid  -vf pp=fd -xvidencopts $XVID_OPTS"
+
+
+function canon() {
+    #mencoder $1 -o $2 -oac copy -ovc lavc -srate 11025 -channels 1 -af-adv force=1 -lavcopts vcodec=mpeg4:vbitrate=496:vpass=1 -vf harddup
+
+    #mencoder $1 -o $2 -oac copy -ovc lavc -srate 11025 -channels 1 -af-adv force=1 -lavcopts vcodec=mpeg4:mbd=2:trell:vbitrate=496:vpass=2 -vf harddup
+
+    mencoder $1 -o $2 -oac copy $XVID:pass=1 $MSG_LEVEL
+    mencoder $1 -o $2 -oac copy $XVID:pass=2 $MSG_LEVEL
+}
+
+function camera() {
+    AUDIO_BITRATE="192"
+
+    #LAME_OPTS="vbr=3"
+    #LAME="-oac mp3lame -lameopts $LAME_OPTS -srate 8000"
+    LAME="-oac copy"
+
+
+    mencoder $1 $LAME $XVID:pass=1 -o /dev/null $MSG_LEVEL #-endpos 180
+    mencoder $1 $LAME $XVID:pass=2 -o $2 $MSG_LEVEL #-endpos 180
+
+    if [ -f divx2pass.log ];  then
+        rm divx2pass.log
+    fi
+}
+
+if [ "$canon" == "1" ]; then
+    canon $1 $outfile
+    exit 0
+fi
+
+camera $1 $outfile
 
 # encode into flash video
 # mencoder orig_file.ext -ofps 25 -o dest_file.flv -of lavf -oac mp3lame -lameopts abr:br=64 -srate 22050 -ovc lavc -lavfopts i_certify_that_my_video_stream_does_not_use_b_frames -lavcopts vcodec=flv:keyint=50:vbitrate=300:mbd=2:mv0:trell:v4mv:cbp:last_pred=3 -vop scale=320:240

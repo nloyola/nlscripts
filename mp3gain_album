@@ -4,15 +4,35 @@ unless (@ARGV) {
    die "usage: $0 mp3file [ mp3file ... ]\n";
 }
 
+$clipped = 0;
+
 @quotedfiles = map { qq("$_") } @ARGV;
 
 $listout = `mp3gain -o @quotedfiles`;
 
 ($albumgain) = ($listout =~ /^"Album"\s+(\S+)/m);
+@maxsample = ($listout =~ /^.+?\t-*\d+\s+\S+\s+(\d+\.\d+)/mg);
 
 print "Will attempt to apply MP3 gain of $albumgain\n";
 
-for $file (@quotedfiles) {
-   $stdout = `mp3gain -g $albumgain $file`;  
+if ($albumgain > 0) {
+   for (0 .. $#maxsample) {
+       while ($maxsample[$_] * (2**($albumgain/4)) > 32767) {
+           $clipped = 1;
+           $albumgain--;
+       }
+   }
+}
+
+if ($clipped) {
+   print "Clipping detected - reducing MP3 gain to $albumgain\n";
+}
+
+if ($albumgain != 0) {
+   for $file (@quotedfiles) {
+       $stdout = `mp3gain -g $albumgain $file`;
+   }
+} else {
+   print "No processing required for MP3 gain 0\n";
 }
 

@@ -1,0 +1,50 @@
+#!/usr/bin/perl -w
+
+
+use File::Find;
+use File::Basename;
+
+sub processFile {
+    if (-f $_) { return; }
+
+    my $movie;
+
+    ($movie = $File::Find::name) =~ s/\/media\/Xvid[^\/]+\/([^\/]+)/$1/g;
+
+    if (!defined $1) { return; };
+
+    print MOVIEFILE " " . $movie . "\n";
+}
+
+my $moviefilename = "/home/nelson/movies.txt";
+my $backup_moviefilename = "/tmp/movies_backup.txt";
+
+if (!-e $moviefilename) {
+    die "file $moviefilename not found\n";
+}
+
+rename $moviefilename, $backup_moviefilename;
+
+open(BACKUP, "< $backup_moviefilename")
+    or die "can't open file $backup_moviefilename\n";
+
+open(MOVIEFILE, "> $moviefilename")
+    or die "can't open file $moviefilename\n";
+
+my ($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst) = localtime(time);
+
+printf MOVIEFILE "%4d-%02d-%02d %02d:%02d:%02d\n",
+    $year+1900,$mon+1,$mday,$hour,$min,$sec;
+
+File::Find::find ( {wanted => \&processFile}, '/media');
+
+print MOVIEFILE "\n";
+
+while (<BACKUP>) {
+    print MOVIEFILE $_;
+}
+
+close(MOVIEFILE);
+close(BACKUP);
+
+1;

@@ -5,6 +5,7 @@ use Getopt::Long;
 use File::Basename;
 use Image::ExifTool;
 use Image::ExifTool::RIFF;
+use Data::Dumper;
 
 
 my %files;
@@ -38,10 +39,17 @@ sub processFile {
     my $path;
     my $thmFile;
 
-    if (($fname =~ /\.jpg$/) || ($fname =~ /\.avi$/)) {
+    if (($fname =~ /\.(jpg|JPG)$/) || ($fname =~ /\.(avi|AVI)$/)) {
         ($basename, $path) = fileparse ($File::Find::name);
         push (@{ $files{$path . $basename} }, $basename);
         push (@{ $files{$path . $basename} }, $path);
+
+        if ($fname =~ /\.avi$/) {
+            ($thmFile = $path . $basename) =~ s/\.avi$/\.THM/;
+            if (-e $thmFile) {
+                push (@{ $files{$path . $basename} }, $thmFile);
+            }
+        }
     }
 }
 
@@ -70,11 +78,6 @@ sub main {
 
             $info = $exifTool->ImageInfo($path . $basename, \@ioTagList);
 
-            if (defined ($thmFile)) {
-                # get date and time info from THM file
-                $info = $exifTool->ImageInfo($thmFile, \@ioTagList);
-            }
-
             if (defined($info->{'DateTimeOriginal'})) {
                 print $info->{'DateTimeOriginal'};
             }
@@ -91,10 +94,10 @@ sub main {
         my $info;
         my $type;
 
-        if ($basename =~ /\.jpg$/) {
+        if ($basename =~ /\.(jpg|JPG)$/) {
             $type = '.jpg';
         }
-        elsif ($basename =~ /\.avi$/) {
+        elsif ($basename =~ /\.(avi|AVI)$/) {
             $type = '.avi';
         }
 

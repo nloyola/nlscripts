@@ -3,6 +3,7 @@
 use File::Find;
 use Getopt::Long;
 use File::Basename;
+use Data::Dumper;
 
 my $USAGE = <<USAGE_END;
 Usage: $0 [options]
@@ -93,6 +94,8 @@ sub unrarDir {
 
     foreach $dir (keys %rarDirs) {
         my @files = @{ $rarDirs {$dir} };
+
+        #print Dumper(\%rarDirs);
 
         if ($#files == 0) {
             print "Extracting: " . $dir . $files[0] . "\n";
