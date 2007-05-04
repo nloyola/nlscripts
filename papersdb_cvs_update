@@ -2,7 +2,7 @@
 
 #------------------------------------------------------------------------------
 #
-# Name: $Id: papersdb_cvs_update,v 1.1 2007/04/10 16:07:05 cvs Exp $
+# Name: $Id: papersdb_cvs_update,v 1.2 2007/05/04 22:18:28 cvs Exp $
 #
 # See $USAGE.
 #
@@ -104,10 +104,11 @@ sub main {
 
     $exp->log_stdout (1);
 
-    cmd ("cd web_docs");
     cmd ("export CVS_RSH=ssh");
+    cmd ("cd web_docs");
     cmd ("cvs up -d");
     cmd ("find . -type d -exec chmod 755 {} \\;");
+    cmd ("chmod 777 uploaded_files");
     cmd ("find . -type f -exec chmod 755 {} \\;");
 
     $exp->hard_close ();

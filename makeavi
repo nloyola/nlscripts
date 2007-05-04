@@ -22,8 +22,8 @@ shift $(($OPTIND - 1))
 
 ext=${1##*.}
 
-if [ "$ext" != "avi" ]; then
-    echo "$1 is not an avi file"
+if [ "$ext" != "avi" -a "$ext" != "dv" ]; then
+    echo "$1 is not an avi or dv file"
     exit
 fi
 
