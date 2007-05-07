@@ -78,11 +78,15 @@ foreach my $date (@past_dates) {
     my $url = $lottoUrl . '&date=' . $date;
     print "Fetching numbers for " . $date . "...\n";
     @{ $numbers{$date} } = parseLottoNumbers($url, 0);
+
+    if (scalar @{ $numbers{$date} } != 7) {
+        die "draw for date $date does not have 6 number and a bonus number\n";
+    }
 }
 
 print "\n\nOur numbers:\n";
-foreach my $ours (keys %our_numbers) {
-    print "  " . $ours . ") " . join(', ', @{ $our_numbers{$ours} }) . "\n";
+foreach my $set (keys %our_numbers) {
+    print "  " . $set . ") " . join(', ', @{ $our_numbers{$set} }) . "\n";
 }
 
 print "\n\t\t\t\t\tNum Matches\n"
@@ -90,65 +94,70 @@ print "\n\t\t\t\t\tNum Matches\n"
     . "--------------- ----------------------- ------- ------- ---------------\n";
 
 foreach my $date (sort keys %numbers) {
+    my @row;
     my %matches = ();
     my %bonus_matches = ();
 
-    foreach my $ours (keys %our_numbers) {
-        $matches{$ours} = 0;
-        $bonus_matches{$ours} = 0;
+    push(@row, $date);
+    push(@row, join(' ', @{ $numbers{$date} }));
+
+    # initialize counts
+    foreach my $set (keys %our_numbers) {
+        $matches{$set} = 0;
+        $bonus_matches{$set} = 0;
     }
 
-    if (scalar @{ $numbers{$date} } == 7) {
-        print $date . "\t";
+    # see how many matching numbers we have
+    foreach my $num (@{ $numbers{$date} }) {
+        foreach my $set (keys %our_numbers) {
 
-        print join(' ', @{ $numbers{$date} }) . "\t";
-
-        foreach my $num (@{ $numbers{$date} }) {
-            foreach my $ours (keys %our_numbers) {
-
-                foreach my $mynum (@{ $our_numbers{$ours} }) {
-                    if ($num =~ /b(\d+)/) {
-                        if ($mynum == $1) {
-                            ++$bonus_matches{$ours};
-                        }
+            foreach my $mynum (@{ $our_numbers{$set} }) {
+                if ($num =~ /b(\d+)/) {
+                    if ($mynum == $1) {
+                        ++$bonus_matches{$set};
                     }
-                    elsif ($mynum == $num) {
-                        ++$matches{$ours};
-                    }
+                }
+                elsif ($mynum == $num) {
+                    ++$matches{$set};
                 }
             }
         }
+    }
 
-        foreach my $ours (keys %matches) {
-            if ($bonus_matches{$ours} == 0) {
-                print $matches{$ours} . "\t";
-            }
-            else {
-                print $matches{$ours} . " (" . $bonus_matches{$ours} . ")\t";
-            }
+    foreach my $set (keys %matches) {
+        if ($bonus_matches{$set} == 0) {
+            push(@row, $matches{$set});
+        }
+        else {
+            push(@row, $matches{$set} . " +b");
         }
     }
 
-    foreach my $ours (keys %matches) {
-        if (($matches{$ours} == 2) && ($bonus_matches{$ours} == 1)) {
-            print "won \$5 with ". $ours;
+    my @winnings = ();
+    foreach my $set (keys %matches) {
+        if (($matches{$set} == 2) && ($bonus_matches{$set} == 1)) {
+            push(@winnings, "won \$5 with ". $set);
         }
-        elsif ($matches{$ours} == 3) {
-            print "won \$10 with ". $ours;
+        elsif ($matches{$set} == 3) {
+            push(@winnings, "won \$10 with ". $set);
         }
-        elsif ($matches{$ours} == 4) {
-            print "won \$80.10 with ". $ours;
+        elsif ($matches{$set} == 4) {
+            push(@winnings, "won \$80.10 with ". $set);
         }
-        elsif ($matches{$ours} == 5) {
-            print "won \$2,361.90 with ". $ours;
+        elsif ($matches{$set} == 5) {
+            push(@winnings, "won \$2,361.90 with ". $set);
         }
-        elsif (($matches{$ours} == 5) && ($bonus_matches{$ours} == 1)) {
-            print "won \$105,790.90 with ". $ours;
+        elsif (($matches{$set} == 5) && ($bonus_matches{$set} == 1)) {
+            push(@winnings, "won \$105,790.90 with ". $set);
         }
-        elsif ($matches{$ours} == 6) {
-            print "won GRAND PRIZE with ". $ours;
+        elsif ($matches{$set} == 6) {
+            push(@winnings, "won GRAND PRIZE with ". $set);
         }
     }
 
-    print "\n";
+    if (scalar @winnings > 0) {
+        push(@row, join(', ', @winnings));
+    }
+
+    print join("\t", @row) . "\n";
 }
