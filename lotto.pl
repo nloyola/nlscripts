@@ -16,8 +16,8 @@ my $date_options = 0;
 
 my $lottoUrl = 'http://www.mytelus.com/lotteries/display.do?colID=649west&prov=ab';
 
-my %our_numbers = (0 => [2, 7, 11, 25, 29, 48],
-                   1 => [9, 33, 35, 36, 37, 46]);
+my %our_numbers = ('A' => [2, 7, 11, 25, 29, 48],
+                   'B' => [9, 33, 35, 36, 37, 46]);
 
 
 my @valid_dates = ('2007-02-03', '2008-01-30');
@@ -67,6 +67,7 @@ sub parseLottoNumbers {
     return @numbers;
 }
 
+# the first call is to get the draw dates
 parseLottoNumbers($lottoUrl, 1);
 
 foreach my $date (@past_dates) {
@@ -79,18 +80,75 @@ foreach my $date (@past_dates) {
     @{ $numbers{$date} } = parseLottoNumbers($url, 0);
 }
 
+print "\n\nOur numbers:\n";
+foreach my $ours (keys %our_numbers) {
+    print "  " . $ours . ") " . join(', ', @{ $our_numbers{$ours} }) . "\n";
+}
+
+print "\n\t\t\t\t\tNum Matches\n"
+    . "Draw\t\tNumbers\t\t\tA\tB\tWinnings\n"
+    . "--------------- ----------------------- ------- ------- ---------------\n";
+
 foreach my $date (sort keys %numbers) {
+    my %matches = ();
+    my %bonus_matches = ();
+
+    foreach my $ours (keys %our_numbers) {
+        $matches{$ours} = 0;
+        $bonus_matches{$ours} = 0;
+    }
+
     if (scalar @{ $numbers{$date} } == 7) {
-        if ($date eq '') {
-            print "Last Draw: ";
-        }
-        else {
-            print "Draw on " . $date . ": ";
-        }
+        print $date . "\t";
+
+        print join(' ', @{ $numbers{$date} }) . "\t";
 
         foreach my $num (@{ $numbers{$date} }) {
-            print $num . " ";
+            foreach my $ours (keys %our_numbers) {
+
+                foreach my $mynum (@{ $our_numbers{$ours} }) {
+                    if ($num =~ /b(\d+)/) {
+                        if ($mynum == $1) {
+                            ++$bonus_matches{$ours};
+                        }
+                    }
+                    elsif ($mynum == $num) {
+                        ++$matches{$ours};
+                    }
+                }
+            }
         }
-        print "\n";
+
+        foreach my $ours (keys %matches) {
+            if ($bonus_matches{$ours} == 0) {
+                print $matches{$ours} . "\t";
+            }
+            else {
+                print $matches{$ours} . " (" . $bonus_matches{$ours} . ")\t";
+            }
+        }
     }
+
+    foreach my $ours (keys %matches) {
+        if (($matches{$ours} == 2) && ($bonus_matches{$ours} == 1)) {
+            print "won \$5 with ". $ours;
+        }
+        elsif ($matches{$ours} == 3) {
+            print "won \$10 with ". $ours;
+        }
+        elsif ($matches{$ours} == 4) {
+            print "won \$80.10 with ". $ours;
+        }
+        elsif ($matches{$ours} == 5) {
+            print "won \$2,361.90 with ". $ours;
+        }
+        elsif (($matches{$ours} == 5) && ($bonus_matches{$ours} == 1)) {
+            print "won \$105,790.90 with ". $ours;
+        }
+        elsif ($matches{$ours} == 6) {
+            print "won GRAND PRIZE with ". $ours;
+        }
+    }
+
+    print "\n";
 }
