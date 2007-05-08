@@ -4,9 +4,21 @@ use strict;
 use LWP::Simple;
 use Date::Manip;
 use Data::Dumper;
+use HTML::Table;
 
 # http://www.mytelus.com/lotteries/display.do?colID=649west&prov=ab
 # http://www.mytelus.com/lotteries/display.do?colID=649west&prov=ab&date=2007-05-02
+
+my $PAGE_HDR = <<PAGE_HDR_END;
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.0 Transitional//EN">
+<html>
+  <head>
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+    <title>Lotto 6-49</title>
+    <link rel="stylesheet" type="text/css" href="style.css"/>
+  </head>
+  <body>
+PAGE_HDR_END
 
 my %numbers;
 my @past_dates = ();
@@ -70,6 +82,19 @@ sub parseLottoNumbers {
     return \%draw;
 }
 
+sub in_set {
+    my $num = shift;
+    my $set = shift;
+
+    foreach (@{ $our_numbers{$set} }) {
+        if ($_ == $num) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
 sub in_draw {
     my $item = shift;
     my $date = shift;
@@ -105,23 +130,55 @@ foreach my $date (@past_dates) {
     }
 }
 
-print "\n\nOur numbers:\n";
+open(HTML, "> index.html");
+
+print HTML $PAGE_HDR;
+print HTML "<h3>Our Numbers</h3>";
+
+my $table = new HTML::Table(-align =>'left', -border => 0);
+
 foreach my $set (keys %our_numbers) {
-    print "  " . $set . ") " . join(', ', @{ $our_numbers{$set} }) . "\n";
+    $table->addRow(($set . ')', join(' ', @{ $our_numbers{$set} })));
 }
+print HTML $table->getTable() . "<p/>\n";
 
-print "\n\t\t\t\t\tNum Matches\n"
-    . "Draw\t\tNumbers\t\t\tA\tB\tWinnings\n"
-    . "--------------- ----------------------- ------- ------- ---------------\n";
+print HTML "<h3>Draws</h3>";
 
+$table = new HTML::Table(-align =>'left', -border => 0);
+$table->addRow(('',     '',        'Num Matches', '', ''));
+$table->setRowHead(1);
+$table->setCellColSpan(1, 3, 2);
+$table->addRow(('Date', 'Numbers', 'A', 'B', 'Winnings'));
+$table->setRowHead(2);
+
+my $row_count = 3;
 foreach my $date (reverse sort keys %numbers) {
     my @row;
     my %matches = ();
     my %bonus_matches = ();
 
     push(@row, $date);
-    push(@row, join(' ', @{ $numbers{$date}{'numbers'} }) . ' b'
-         . $numbers{$date}{'bonus'});
+    my @disp_num = ();
+    my @keys = sort keys %our_numbers;
+    foreach (@{ $numbers{$date}{'numbers'} }) {
+        if (in_set($_, $keys[0]) || in_set($_, $keys[1])) {
+            push(@disp_num, '<span style="color: #00008B;font-weight: bold;">' . $_ . '</span>');
+        }
+        else {
+            push(@disp_num, $_);
+        }
+    }
+
+    if (in_set($numbers{$date}{'bonus'}, $keys[0])
+        || in_set($numbers{$date}{'bonus'}, $keys[1])) {
+        push(@disp_num, '<span style="color: #00008B;font-weight: bold;">'
+             . 'b' . $numbers{$date}{'bonus'} . '</span>');
+    }
+    else {
+        push(@disp_num, 'b' . $numbers{$date}{'bonus'});
+    }
+    push(@row, join(' ', @disp_num));
+
 
     # initialize counts
     foreach my $set (keys %our_numbers) {
@@ -177,5 +234,17 @@ foreach my $date (reverse sort keys %numbers) {
         push(@row, join(', ', @winnings));
     }
 
-    print join("\t", @row) . "\n";
+    $table->addRow(@row);
+    if (($row_count > 2) && (($row_count & 1) == 0)) {
+        $table->setRowBGColor($row_count, '#F7F7F7');
+    }
+    ++$row_count;
 }
+print HTML $table->getTable() . "\n";
+
+print HTML "</body>\n</html>";
+
+
+close HTML;
+
+0;
