@@ -22,11 +22,14 @@ my %our_numbers = ('A' => [2, 7, 11, 25, 29, 48],
 
 my @valid_dates = ('2007-02-03', '2008-01-30');
 
+# for debug
+#my @valid_dates = ('2007-05-05', '2008-01-30');
+
 sub parseLottoNumbers {
     my $url = shift;
     my $get_past_draws = shift;
     my $doc = get $url;
-    my @numbers = ();
+    my %draw = ();
 
     for my $line (split("\n", $doc)) {
         if ($line =~ /header.*winning numbers/) {
@@ -49,11 +52,11 @@ sub parseLottoNumbers {
 
         if ($num_table) {
             if ($line =~ /<td><font class="faceonly" size="2">(\d{1,2})<\/font><\/td>/) {
-                push (@numbers, $1);
+                push (@{ $draw{'numbers'} }, $1);
             }
 
             if ($line =~ /<td bgcolor="#eeeeee" align="center"><font class="faceonly" size="2">(\d{1,2})<\/font><\/td>/) {
-                push (@numbers, 'b' . $1);
+                $draw{'bonus'} = $1;
             }
         }
 
@@ -64,7 +67,24 @@ sub parseLottoNumbers {
         }
     }
 
-    return @numbers;
+    return \%draw;
+}
+
+sub in_draw {
+    my $item = shift;
+    my $date = shift;
+
+    foreach my $num (@{ $numbers{$date}{'numbers'} }) {
+        if ($num == $item) {
+            return 1;
+        }
+    }
+
+    if ($numbers{$date}{'bonus'} == $item) {
+        return 2;
+    }
+
+    return 0;
 }
 
 # the first call is to get the draw dates
@@ -77,10 +97,11 @@ foreach my $date (@past_dates) {
 
     my $url = $lottoUrl . '&date=' . $date;
     print "Fetching numbers for " . $date . "...\n";
-    @{ $numbers{$date} } = parseLottoNumbers($url, 0);
+    $numbers{$date} = parseLottoNumbers($url, 0);
 
-    if (scalar @{ $numbers{$date} } != 7) {
-        die "draw for date $date does not have 6 number and a bonus number\n";
+    if ((scalar @{ $numbers{$date}{'numbers'} } != 6)
+        && (scalar @{ $numbers{$date}{'bonus'} } != 1)) {
+        die "draw for date $date does not have 6 numbers and a bonus number\n";
     }
 }
 
@@ -93,13 +114,14 @@ print "\n\t\t\t\t\tNum Matches\n"
     . "Draw\t\tNumbers\t\t\tA\tB\tWinnings\n"
     . "--------------- ----------------------- ------- ------- ---------------\n";
 
-foreach my $date (sort keys %numbers) {
+foreach my $date (reverse sort keys %numbers) {
     my @row;
     my %matches = ();
     my %bonus_matches = ();
 
     push(@row, $date);
-    push(@row, join(' ', @{ $numbers{$date} }));
+    push(@row, join(' ', @{ $numbers{$date}{'numbers'} }) . ' b'
+         . $numbers{$date}{'bonus'});
 
     # initialize counts
     foreach my $set (keys %our_numbers) {
@@ -108,18 +130,14 @@ foreach my $date (sort keys %numbers) {
     }
 
     # see how many matching numbers we have
-    foreach my $num (@{ $numbers{$date} }) {
-        foreach my $set (keys %our_numbers) {
-
-            foreach my $mynum (@{ $our_numbers{$set} }) {
-                if ($num =~ /b(\d+)/) {
-                    if ($mynum == $1) {
-                        ++$bonus_matches{$set};
-                    }
-                }
-                elsif ($mynum == $num) {
-                    ++$matches{$set};
-                }
+    foreach my $set (keys %our_numbers) {
+        foreach my $mynum (@{ $our_numbers{$set} }) {
+            my $result = in_draw($mynum, $date);
+            if ($result == 1) {
+                ++$matches{$set};
+            }
+            elsif ($result == 2) {
+                ++$bonus_matches{$set};
             }
         }
     }
