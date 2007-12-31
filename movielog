@@ -1,23 +1,55 @@
 #!/usr/bin/perl -w
 
-
 use File::Find;
 use File::Basename;
+use Data::Dumper;
+use Getopt::Long;
 
-sub processFile {
-    if (-f $_) { return; }
-
-    my $movie;
-
-    ($movie = $File::Find::name) =~ s/\/media\/Xvid[^\/]+\/([^\/]+)/$1/g;
-
-    if (!defined $1) { return; };
-
-    print MOVIEFILE " " . $movie . "\n";
-}
-
+my $dvddir;
+my @movie_names = ();
 my $moviefilename = "/home/nelson/movies.txt";
 my $backup_moviefilename = "/tmp/movies_backup.txt";
+my $debug;
+
+if (!GetOptions ('debug' => \$debug)) {
+    die "ERROR: bad options in command line\n";
+}
+
+if ($#ARGV >= 0) {
+    $dvddir = $ARGV[0];
+}
+
+if (!defined($dvddir)) {
+    $dvddir = "/media/Xvid";
+}
+elsif (! -d $dvddir) {
+    die "$dvddir is not a valid directory\n";
+}
+
+sub readDir {
+    my $dir = shift;
+
+    opendir(DIRHANDLE, $dir) || die "Cannot opendir $dir: $!";
+    foreach my $name (sort readdir(DIRHANDLE)) {
+        if (-d "$dir/$name") {
+            if ($name =~ /^\.+/) { next; }
+
+            push(@movie_names, $name);
+        }
+    }
+}
+
+if ($debug) {
+    my ($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst) = localtime(time);
+    printf "%4d-%02d-%02d %02d:%02d:%02d\n",
+        $year+1900,$mon+1,$mday,$hour,$min,$sec;
+
+    readDir($dvddir);
+    foreach (@movie_names) {
+        print "  ", $_, "\n";
+    }
+    exit;
+}
 
 if (!-e $moviefilename) {
     die "file $moviefilename not found\n";
@@ -33,10 +65,18 @@ open(MOVIEFILE, "> $moviefilename")
 
 my ($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst) = localtime(time);
 
+
+printf "%4d-%02d-%02d %02d:%02d:%02d\n",
+    $year+1900,$mon+1,$mday,$hour,$min,$sec;
+
 printf MOVIEFILE "%4d-%02d-%02d %02d:%02d:%02d\n",
     $year+1900,$mon+1,$mday,$hour,$min,$sec;
 
-File::Find::find ( {wanted => \&processFile}, '/media');
+readDir($dvddir);
+foreach (@movie_names) {
+    print MOVIEFILE " " . $_ . "\n";
+    print " " . $_ . "\n";
+}
 
 print MOVIEFILE "\n";
 

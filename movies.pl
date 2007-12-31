@@ -5,8 +5,9 @@ use File::Basename;
 use File::Find;
 use Getopt::Long;
 use IMDB::Film;
-use File::Listing;
+use File::Listing qw(parse_dir);
 use HTML::Table;
+use Data::Dumper;
 
 my $SCRIPTNAME = basename ($0);
 
@@ -28,20 +29,37 @@ PAGE_HDR_END
 
 my %movie_names;
 my %rated_movies;
+my @tdirs = qw(/home/nelson/torrents
+               /mnt/v01/home/nelson/torrents/burned
+               /mnt/v01/home/nelson/torrents/burned2
+               /mnt/v01/home/nelson/torrents/burned3
+               /mnt/v01/home/nelson/torrents/burned4
+               /mnt/extra/torrents
+               /mnt/v01/home/nelson/torrents/Kids
+               /mnt/v01/home/nelson/torrents/watched);
+my @problems;
 my $debug;
-my ($tdir, $name, $type, $size, $mtime, $mode);
+my ($name, $type, $size, $mtime, $mode);
 my $table;
 my $unrated = -1;
 
 sub getImdbInfo {
     my $name = shift;
-    my ($key, $rating, $vnum) = (0, 0, 0);
+    my ($key, $sub, $rating, $vnum) = (0, '', 0, 0);
     my ($titleLower, $nameLower);
 
-    my $imdbObj = new IMDB::Film(crit => $name, debug => 0, cache => 1);
+    if (exists($movie_names{$name}{'imdb'})) {
+        $key = $movie_names{$name}{'imdb'};
+    }
+    else {
+        $key = $name;
+    }
 
-    if(!$imdbObj->status) {
+    my $imdbObj = new IMDB::Film(crit => $key, debug => 0, cache => 1);
+
+    if (!$imdbObj->status) {
         print "Something wrong for $name: ".$imdbObj->error . "\n";
+        push(@problems, $name);
         return;
     }
 
@@ -52,6 +70,15 @@ sub getImdbInfo {
     if (($titleLower ne $nameLower) && ($name !~ /^tt/)) {
         $href .= "<br/>" . $name;
     }
+
+    if (exists($movie_names{$name}{'sub'})) {
+        $sub .= "sub ";
+    }
+
+    if (exists($movie_names{$name}{'srt'})) {
+        $sub .= "srt ";
+    }
+
     ($rating, $vnum) = $imdbObj->rating();
 
     if (!defined($rating)) {
@@ -66,30 +93,34 @@ sub getImdbInfo {
 
     my $genres = join(" ", @{$imdbObj->genres()});
     if (exists($rated_movies{$key})) {
-	$key .= " "; # just append a space to make it appear different
+        $key .= " "; # just append a space to make it appear different
     }
-    push(@{$rated_movies{$key}}, ($href, $genres, $imdbObj->year(),
+    push(@{$rated_movies{$key}}, ($href, $sub, $genres, $imdbObj->year(),
                                   $rating, $vnum));
+    print "href/". $href . " genres/" . $genres . " year/" . $imdbObj->year()
+        . " rating/" . $rating . " votes/" . $vnum . "\n";
 }
 
 sub readDir {
     my $tdir = shift;
 
-    for (parse_dir(`ls -l $tdir`)) {
-        ($name, $type, $size, $mtime, $mode) = @$_;
-        next if ($type ne 'd'); # only look for directories
+    opendir(DIRHANDLE, $tdir) || die "Cannot opendir $tdir: $!";
+    foreach my $name (sort readdir(DIRHANDLE)) {
+        if ((-d "$tdir/$name")
+            && ($name !~ /(burned|kids|Music|other|Season|tv|_|\.)/)) {
+            $movie_names{$name}{'name'} = $name;
 
-        if ($name !~ /(burned|burned2|Music|other|Season|SW|TV|_)/) {
-            $movie_names{$name} = 0;
-        }
+            opendir(DIRHANDLE2, "$tdir/$name")
+                || die "Cannot opendir $tdir: $!";
+            foreach my $name2 (sort readdir(DIRHANDLE2)) {
+                if ($name2 =~ /tt(\d+)\.txt/) {
+                    #print $name2 . " " . $1 . "\n";
+                    $movie_names{$name}{'imdb'} = 'tt' . $1;
+                }
 
-        for (parse_dir(`ls -l "$tdir/$name"`)) {
-            my ($name2, $type2, $size2, $mtime2, $mode2);
-
-            ($name2, $type2, $size2, $mtime2, $mode2) = @$_;
-            if ($name2 =~ /tt(\d+)\.txt/) {
-                #print $name2 . " " . $1 . "\n";
-                $movie_names{$name} = 'tt' . $1;
+                if ($name2 =~ /\.(sub|srt)$/) {
+                    $movie_names{$name}{$1} = $name2;
+                }
             }
         }
     }
@@ -100,12 +131,7 @@ sub makeTable {
 
     foreach $name (sort keys %movie_names) {
         print "... " . $name . " ...\n";
-        if ($movie_names{$name} =~ /^tt/) {
-            getImdbInfo($movie_names{$name});
-        }
-        else {
-            getImdbInfo($name);
-        }
+        getImdbInfo($name);
     }
 
     # sort in decending order
@@ -121,30 +147,65 @@ sub makeTable {
     return $table;
 }
 
+sub makeProblemsTable {
+    $table = new HTML::Table(-align =>'center', -border => 0);
+
+    if (scalar @problems > 0) {
+        foreach (sort @problems) {
+            $table->addRow($_);
+        }
+    }
+    return $table;
+}
+
+
 if (!GetOptions ('debug' => \$debug)) {
     die "ERROR: bad options in command line\n";
 }
 
-if ($#ARGV < 0) {
-    $tdir = "/home/nelson/torrents";
+if ($#ARGV >= 0) {
+    @tdirs = ();
+    foreach (@ARGV) {
+        push(@tdirs, $_);
+    }
 }
-else {
-    $tdir = $ARGV[0];
+
+foreach my $tdir (@tdirs) {
+    my($filename, $directories, $suffix) = fileparse($tdir);
+
+    # get name of file
+    ($filename = $tdir) =~ s/\//\./g;
+    $filename =~ s/^\.//g;
+
+    print "Generating $filename.html...\n";
+
+    %movie_names = ();
+    %rated_movies = ();
+    @problems = ();
+
+    readDir($tdir);
+
+    if (scalar keys %movie_names == 0) { die "movie names not found\n"; }
+
+    $table = makeTable();
+
+    open(HTML, "> $filename.html");
+
+    print HTML $PAGE_HDR
+        . "<h1>Movies in " . $tdir . "</h1>"
+            . $table->getTable();
+
+    if (scalar @problems > 0) {
+        $table = makeProblemsTable();
+        if ($table->getTableRows() > 0) {
+            print HTML "<br/>Problems with following:\n";
+            print HTML $table->getTable();
+        }
+    }
+
+    print HTML "</body>\n</html>";
+
+    close HTML;
 }
-
-print "tdir: " . $tdir . "\n";
-
-readDir($tdir);
-
-$table = makeTable();
-
-open(HTML, "> index.html");
-
-print HTML $PAGE_HDR
-    . "<h1>Movies in " . $tdir . "</h1>"
-    . $table->getTable()
-    . "</body>\n</html>";
-
-close HTML;
 
 0;
