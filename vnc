@@ -4,7 +4,8 @@ prog=$"VNC Server"
 geom="1024x768"
 
 if [ "$USER" == "loyola" ]; then
-    VNCSERVER="$HOME/apps/bin/vncserver"
+    #VNCSERVER="$HOME/apps/bin/vncserver"
+    VNCSERVER="/usr/bin/vncserver"
 else
     VNCSERVER="/usr/bin/vncserver"
 fi

@@ -120,6 +120,10 @@ foreach my $date (@past_dates) {
         last;
     }
 
+    if (Date_Cmp($date, $valid_dates[1]) > 0) {
+        next;
+    }
+
     my $url = $lottoUrl . '&date=' . $date;
     print "Fetching numbers for " . $date . "...\n";
     $numbers{$date} = parseLottoNumbers($url, 0);

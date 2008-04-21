@@ -29,11 +29,8 @@ PAGE_HDR_END
 
 my %movie_names;
 my %rated_movies;
-my @tdirs = qw(/home/nelson/torrents
+my @tdirs = qw(/home/nelson/torrents/movies
                /mnt/v01/home/nelson/torrents/burned
-               /mnt/v01/home/nelson/torrents/burned2
-               /mnt/v01/home/nelson/torrents/burned3
-               /mnt/v01/home/nelson/torrents/burned4
                /mnt/extra/torrents
                /mnt/v01/home/nelson/torrents/Kids
                /mnt/v01/home/nelson/torrents/watched);
@@ -107,7 +104,7 @@ sub readDir {
     opendir(DIRHANDLE, $tdir) || die "Cannot opendir $tdir: $!";
     foreach my $name (sort readdir(DIRHANDLE)) {
         if ((-d "$tdir/$name")
-            && ($name !~ /(burned|kids|Music|other|Season|tv|_|\.)/)) {
+            && ($name !~ /(burned|kids|Music|other|Season|tv|watched|_|\.)/)) {
             $movie_names{$name}{'name'} = $name;
 
             opendir(DIRHANDLE2, "$tdir/$name")

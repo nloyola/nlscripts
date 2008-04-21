@@ -55,7 +55,7 @@ sub unrarFile {
 
     if (!defined($dir) || !defined($file)) { return; }
 
-    my $cmd = "cd \"" . $dir . "\" && nice /usr/bin/unrar e " . $file;
+    my $cmd = "cd \"" . $dir . "\" && nice -n 12 /usr/bin/unrar e " . $file;
 
     # add error processing as above
     die "cannot fork: $!" unless defined($pid = open(KID_TO_READ, "-|"));
