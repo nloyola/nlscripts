@@ -1,0 +1,115 @@
+#!/usr/bin/perl -w
+
+#------------------------------------------------------------------------------
+#
+# Name: $Id: papersdb_cvs_update,v 1.2 2007/05/04 22:18:28 cvs Exp $
+#
+# See $USAGE.
+#
+#------------------------------------------------------------------------------
+
+use strict;
+use Expect;
+use Getopt::Long;
+
+#
+# Tell Perl where to find our module
+#
+#use lib "$ENV{'HOME'}/pl_scripts";
+
+my $USAGE = <<USAGE_END;
+Usage: $0 HOST COMMAND
+
+  Perl Expect script that starts a gnome-terminal on a remote machine.
+USAGE_END
+
+my $exp;
+
+main ();
+
+#------------------------------------------------------------------------------
+#
+# Used to send a command to the board. Can specify a command and an optional
+# timeout.
+#
+#------------------------------------------------------------------------------
+sub cmd {
+    my $command = shift;
+    my $timeout = shift;
+    my $result = 0;
+
+    if (!defined ($timeout)) {
+        $timeout = 15;
+    }
+
+    my $stdOutLog = $exp->log_stdout ();
+    #$exp->log_stdout (0); # suppress output
+
+    print "sending command: $command\n";
+    $exp->send ("$command\n");
+    $exp->expect ($timeout,
+                  [
+                   timeout => sub { die "no response.\n"; }
+                  ],
+                  '-re', qr/\$/, #' wait for shell prompt
+                 );
+    $exp->log_stdout ($stdOutLog); #restore the stdOut log
+    return $result;
+}
+
+#------------------------------------------------------------------------------
+#
+# Same as cmd but it returns the buffer containing the command response.
+# The first line of the returned buffer containes the command itself.
+#
+#------------------------------------------------------------------------------
+sub cmdResp {
+    my $command = shift;
+    my $timeout = shift;
+
+    my $stdOutLog = $exp->log_stdout();
+    #$exp->log_stdout(0); # suppress output
+    if (!defined ($timeout)) {
+        $timeout = 5;
+    }
+
+    $exp->send ("$command\n");
+    $exp->clear_accum();
+    $exp->expect ($timeout,
+                  [
+                   timeout =>
+                   sub { die "no response.\n"; }
+                  ],
+                  '-re', qr/\$/, #' wait for shell prompt
+                 );
+
+    $exp->log_stdout ($stdOutLog); #restore the stdOut log
+    return $exp->exp_before();
+}
+
+#------------------------------------------------------------------------------
+#
+#
+#------------------------------------------------------------------------------
+sub main {
+    $exp = Expect->spawn('ssh -l papersdb kingman')
+        or die "Cannot spawn ssh: " . $exp->exp_error() . "\n";
+
+    #$exp->debug(1);
+
+    unless ($exp->expect(30, -re, '\$')) {
+        return "Never got the prompt on menaik during login,"
+            . $exp->exp_error() . "\n";
+    }
+
+    $exp->log_stdout (1);
+
+    cmd ("cd web_docs");
+    cmd ("git pull");
+    cmd ("find . -type d -exec chmod 755 {} \\;");
+    cmd ("chmod 777 uploaded_files");
+    cmd ("find . -type f -exec chmod 755 {} \\;");
+
+    $exp->hard_close ();
+    print "\n";
+}
