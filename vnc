@@ -1,7 +1,8 @@
 #!/bin/bash
 
 prog=$"VNC Server"
-geom="1024x768"
+geom="1280x1024"
+session=$2
 
 if [ "$USER" == "loyola" ]; then
     #VNCSERVER="$HOME/apps/bin/vncserver"
@@ -11,19 +12,14 @@ else
 fi
 
 if [ ${USER} = "nelson" ]; then
-    session=$":1"
-    geom="1280x1024"
-elif [ ${USER} = "loyola" ]; then
-    session=$":1"
     geom=1024x768
+elif [ ${USER} = "loyola" ]; then
+    geom="1280x1024"
 elif [ ${USER} = "root" ]; then
     echo "Do not un VNC as root. *smack* bad user..." && exit 0
-else
-    echo $"${USER} does not have a valid VNC account." && exit
 fi
 
-start ()
-{
+start () {
         $VNCSERVER -name ${HOSTNAME} -geometry $geom -depth 24 $session
 }
 
