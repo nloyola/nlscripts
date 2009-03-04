@@ -1,0 +1,58 @@
+#!/bin/bash
+
+if [ -z "$JBOSS_HOME" ]; then
+   echo "JBOSS_HOME is not defined"
+   exit
+fi
+
+COMMAND="java -Dprogram.name=run.sh -server -Xms128m -Xmx512m -Dsun.rmi.dgc.client.gcInterval=3600000 -Dsun.rmi.dgc.server.gcInterval=3600000 -Djava.endorsed.dirs=/home/loyola/apps/jboss-4.0.5.GA/lib/endorsed -classpath /home/loyola/apps/jboss-4.0.5.GA/bin/run.jar:/lib/tools.jar org.jboss.Main -b 0.0.0.0"
+
+start () {
+    if [ -e $JBOSS_HOME/nohup.out ]; then
+        rm $JBOSS_HOME/nohup.out
+    fi
+    cd $JBOSS_HOME && nohup bin/run.sh -b 0.0.0.0 &
+}
+
+stop () {
+    OUT=`pgrep -f -x "$COMMAND"`
+    if [ -n "$OUT" ]; then
+        cd $JBOSS_HOME && bin/shutdown.sh -S
+    fi
+    while [ -n "$OUT" ]
+    do
+        OUT=`pgrep -f -x "$COMMAND"`
+        echo "waiting for shutdown..."
+        sleep 1
+    done
+}
+
+status() {
+    OUT=`pgrep -f -x "$COMMAND"`
+    if [ -n "$OUT" ]; then
+        echo "jboss is running"
+    else
+        echo "jboss is stopped"
+    fi
+}
+
+case $1 in
+        start)
+          start
+        ;;
+        stop|kill)
+          stop
+        ;;
+        restart|reload)
+          stop
+          sleep 3
+          start
+        ;;
+        status)
+          status
+        ;;
+        *)
+          echo $"Invalid option. Usage: $0 [start|stop|kill|restart|reload]."
+        ;;
+esac
+
