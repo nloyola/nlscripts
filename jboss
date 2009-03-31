@@ -5,7 +5,7 @@ if [ -z "$JBOSS_HOME" ]; then
    exit
 fi
 
-COMMAND="java -Dprogram.name=run.sh -server -Xms128m -Xmx512m -Dsun.rmi.dgc.client.gcInterval=3600000 -Dsun.rmi.dgc.server.gcInterval=3600000 -Djava.endorsed.dirs=/home/loyola/apps/jboss-4.0.5.GA/lib/endorsed -classpath /home/loyola/apps/jboss-4.0.5.GA/bin/run.jar:/lib/tools.jar org.jboss.Main -b 0.0.0.0"
+COMMAND_RE="[j]ava.*jboss"
 
 start () {
     if [ -e $JBOSS_HOME/nohup.out ]; then
@@ -15,20 +15,20 @@ start () {
 }
 
 stop () {
-    OUT=`pgrep -f -x "$COMMAND"`
+    OUT=`ps -eaf | grep "$COMMAND_RE"`
     if [ -n "$OUT" ]; then
         cd $JBOSS_HOME && bin/shutdown.sh -S
     fi
     while [ -n "$OUT" ]
     do
-        OUT=`pgrep -f -x "$COMMAND"`
+	OUT=`ps -eaf | grep "$COMMAND_RE"`
         echo "waiting for shutdown..."
         sleep 1
     done
 }
 
 status() {
-    OUT=`pgrep -f -x "$COMMAND"`
+    OUT=`ps -eaf | grep "$COMMAND_RE"`
     if [ -n "$OUT" ]; then
         echo "jboss is running"
     else
