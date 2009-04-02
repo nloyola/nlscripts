@@ -11,7 +11,7 @@ start () {
     if [ -e $JBOSS_HOME/nohup.out ]; then
         rm $JBOSS_HOME/nohup.out
     fi
-    cd $JBOSS_HOME && nohup bin/run.sh -b 0.0.0.0 >& /dev/null &
+    cd $JBOSS_HOME && nohup bin/run.sh -b 0.0.0.0 2> /dev/null &
     echo "jboss started"
 }
 
