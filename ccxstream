@@ -10,17 +10,12 @@
 . /etc/rc.d/init.d/functions
 
 # Path to the apachectl script, server binary, and short-form for messages.
-ccxstream=/usr/local/bin/ccxstream
+ccxstream= '/usr/local/src/ccxstream-1.0.15/ccxstream'
 prog=ccxstream
 RETVAL=0
 
-if [ "$HOSTNAME" == "levante" ]; then
-    TORRENT_PATH="/home/nelson/torrents"
-    TORRENT_SHARES=$TORRENT_SHARES" -S games=/home/nelson/games"
-fi
-
 if [ "$HOSTNAME" == "obelix" ]; then
-    TORRENT_PATH="/space/nelson/torrents"
+    TORRENT_PATH="/home/nelson/torrents"
     TORRENT_SHARES=$TORRENT_SHARES" -S games=/home/nelson/games"
 fi
 

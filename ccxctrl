@@ -1,4 +1,4 @@
-#!/usr/local/bin/bash
+#!/bin/bash
 #
 # startup script for ccxStream
 
@@ -62,12 +62,7 @@ function ccxStartLinux()
 
     SHARES=""
     if [ "$HOSTNAME" == "obelix" ]; then
-        ROOT=/space/nelson/torrents
-        SHARES=$SHARES" -S games=/home/nelson/games"
-    fi
-
-    if [ "$HOSTNAME" == "levante" ]; then
-        ROOT=/home/nelson/Desktop/toburn
+        ROOT=/home/nelson/torrents
     fi
 
     $XBOXPATH/ccxstream -L -f -r $ROOT $SHARES
