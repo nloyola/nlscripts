@@ -30,10 +30,7 @@ PAGE_HDR_END
 my %movie_names;
 my %rated_movies;
 my @tdirs = qw(/home/nelson/torrents/movies
-               /mnt/v01/home/nelson/torrents/burned
-               /mnt/extra/torrents
-               /mnt/v01/home/nelson/torrents/Kids
-               /mnt/v01/home/nelson/torrents/watched);
+               /media/disk/torrents/movies_watched);
 my @problems;
 my $debug;
 my ($name, $type, $size, $mtime, $mode);
@@ -98,19 +95,40 @@ sub getImdbInfo {
         . " rating/" . $rating . " votes/" . $vnum . "\n";
 }
 
+sub findNfoLink {
+    my $fname = shift;
+    my $result = '';
+
+    my $matches = `grep -E "http:\/\/(us|uk|www)\.imdb\.com\/title\/" "$fname"`;
+    #print "****" . $matches . "\n";
+    if ($matches =~ /(tt\d+)/) {
+        $result = $1;
+    }
+    return $result;
+}
+
 sub readDir {
     my $tdir = shift;
+    my $nfolink;
 
     opendir(DIRHANDLE, $tdir) || die "Cannot opendir $tdir: $!";
     foreach my $name (sort readdir(DIRHANDLE)) {
-        if ((-d "$tdir/$name")
-            && ($name !~ /(burned|kids|Music|other|Season|tv|watched|_|\.)/)) {
-            $movie_names{$name}{'name'} = $name;
+	if ($name =~ /^\./) { next };
+        if (-d "$tdir/$name") {
+            ($movie_names{$name}{'name'} = $name) =~ s/\./ /g;
+            $movie_names{$name}{'name'} =~ s/\[?DVD.+//ig;
 
             opendir(DIRHANDLE2, "$tdir/$name")
                 || die "Cannot opendir $tdir: $!";
             foreach my $name2 (sort readdir(DIRHANDLE2)) {
-                if ($name2 =~ /tt(\d+)\.txt/) {
+                if ($name2 =~ /\.nfo$/) {
+                    my $nfolink = findNfoLink("$tdir/$name/$name2");
+                    if ($nfolink ne '') {
+                        $movie_names{$name}{'imdb'} = $nfolink;
+                    }
+                }
+
+                if (!exists($movie_names{$name}{'imdb'}) && ($name2 =~ /tt(\d+)\.txt/)) {
                     #print $name2 . " " . $1 . "\n";
                     $movie_names{$name}{'imdb'} = 'tt' . $1;
                 }
