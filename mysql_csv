@@ -1,0 +1,12 @@
+#!/bin/bash
+
+MYSQL=/usr/bin/mysql
+SED=/bin/sed
+USER=$1
+PWD=$2
+DBNAME=$3
+QUERY=$4
+OUTPUT=$5
+
+$MYSQL -u$USER -p$PWD $DBNAME -B -e "$QUERY" | $SED 's/\t/","/g;s/^/"/;s/$/"/;s/\n//g' > $OUTPUT
+

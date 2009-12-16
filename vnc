@@ -12,7 +12,7 @@ else
 fi
 
 if [ ${USER} = "nelson" ]; then
-    geom=1024x768
+    geom="1280x1024"
 elif [ ${USER} = "loyola" ]; then
     geom="1280x1024"
 elif [ ${USER} = "root" ]; then
