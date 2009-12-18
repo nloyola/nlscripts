@@ -1,12 +1,31 @@
 #!/bin/bash
 
+#set -o verbose
+
+ARGS=4
+E_BADARGS=85
+
+if [ $# -lt $ARGS ]  # Correct number of arguments passed to script?
+then
+  echo "Usage: `basename $0` USER PWD DBNAME QUERY [OUTFILE]"
+  exit $E_BADARGS
+fi
+
 MYSQL=/usr/bin/mysql
 SED=/bin/sed
 USER=$1
 PWD=$2
 DBNAME=$3
-QUERY=$4
+QUERY="$4"
 OUTPUT=$5
+PIPE=
 
-$MYSQL -u$USER -p$PWD $DBNAME -B -e "$QUERY" | $SED 's/\t/","/g;s/^/"/;s/$/"/;s/\n//g' > $OUTPUT
+if [ ! -z "$OUTPUT" ]
+then
+   $MYSQL -u$USER -p$PWD -D$DBNAME -B -e "$4" | $SED 's/\t/\",\"/g;s/^/\"/;s/$/\"/;s/\n//g' > $OUTPUT
+else
+   $MYSQL -u$USER -p$PWD -D$DBNAME -B -e "$4" | $SED 's/\t/\",\"/g;s/^/\"/;s/$/\"/;s/\n//g'
+fi
 
+
+exit 0
