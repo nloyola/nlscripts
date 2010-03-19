@@ -1,2 +1,2 @@
 #!/bin/bash
-dpkg-query -l
+dpkg --get-selections | awk '{print $1}'
