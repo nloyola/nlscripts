@@ -1,0 +1,2 @@
+#!/bin/bash
+export `gnome-keyring-daemon --start`
