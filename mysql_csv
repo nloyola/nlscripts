@@ -53,16 +53,6 @@ while getopts "d:H:u:p:o:h" OPTION; do
     esac
 done
 
-echo "args: $*"
-
-QUERY="$1"
-
-echo "dbhost: $DBHOST"
-echo "dbname: $DBNAME"
-echo "dbuser: $DBUSER"
-echo "dbpwd: $DBPWD"
-echo "query: $QUERY"
-
 if [ -z "$DBUSER" ]; then
     echo "ERROR: user not specified"
     echo "$USAGE"
