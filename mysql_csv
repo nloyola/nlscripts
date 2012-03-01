@@ -2,31 +2,96 @@
 
 #set -o verbose
 
-ARGS=5
-E_BADARGS=85
+SCRIPT=`basename $0`
 
-if [ $# -lt $ARGS ]  # Correct number of arguments passed to script?
-then
-  echo "Usage: `basename $0` HOST USER PWD DBNAME QUERY [OUTFILE]"
-  exit $E_BADARGS
-fi
+USAGE="
+Usage: $SCRIPT [OPTIONS] QRY
+
+OPTIONS
+  -H DBHOST   The hostname of the machine running the MySQL server. Defaults to
+              localhost if not specified.
+  -u DBUSER   The user to use on the MySQL server.
+  -o FNAME    File name to save output to.
+  -p PWD      The password to use on the MySQL server.
+  -h          Help text.
+"
 
 MYSQL=/usr/bin/mysql
 SED=/bin/sed
-HOST=$1
-USER=$2
-PWD=$3
-DBNAME=$4
-QUERY="$5"
-OUTPUT=$6
-PIPE=
+DBHOST="localhost"
+
+while getopts "d:H:u:p:o:h" OPTION; do
+    case $OPTION in
+        d)
+            DBNAME="$OPTARG"
+            shift $((OPTIND-1)); OPTIND=1
+            ;;
+        H)
+            DBHOST="$OPTARG"
+            shift $((OPTIND-1)); OPTIND=1
+            ;;
+        u)
+            DBUSER="$OPTARG"
+            shift $((OPTIND-1)); OPTIND=1
+            ;;
+        o)
+            OUTPUT="$OPTARG"
+            shift $((OPTIND-1)); OPTIND=1
+            ;;
+        p)
+            DBPWD="$OPTARG"
+            shift $((OPTIND-1)); OPTIND=1
+            ;;
+        h)
+            echo "$USAGE"
+            exit 1
+            ;;
+        ?)
+            echo "$USAGE"
+            exit 1
+            ;;
+    esac
+done
+
+echo "args: $*"
+
+QUERY="$1"
+
+echo "dbhost: $DBHOST"
+echo "dbname: $DBNAME"
+echo "dbuser: $DBUSER"
+echo "dbpwd: $DBPWD"
+echo "query: $QUERY"
+
+if [ -z "$DBUSER" ]; then
+    echo "ERROR: user not specified"
+    echo "$USAGE"
+    exit
+fi
+
+if [ -z "$DBPWD" ]; then
+    echo "ERROR: password not specified"
+    echo "$USAGE"
+    exit
+fi
+
+if [ -z "$DBNAME" ]; then
+    echo "ERROR: database name not specified"
+    echo "$USAGE"
+    exit
+fi
+
+if [ -z "$QUERY" ]; then
+    echo "ERROR: query name not specified"
+    echo "$USAGE"
+    exit
+fi
 
 if [ ! -z "$OUTPUT" ]
 then
-   $MYSQL -h$HOST -u$USER -p$PWD -D$DBNAME -B -e "$QUERY" | $SED 's/\t/\",\"/g;s/^/\"/;s/$/\"/;s/\n//g' > $OUTPUT
+   $MYSQL -h$DBHOST -u$DBUSER -p$DBPWD -D$DBNAME -B -e "$QUERY" | $SED 's/\t/\",\"/g;s/^/\"/;s/$/\"/;s/\n//g' > $OUTPUT
 else
-   $MYSQL -h$HOST -u$USER -p$PWD -D$DBNAME -B -e "$QUERY" | $SED 's/\t/\",\"/g;s/^/\"/;s/$/\"/;s/\n//g'
+   $MYSQL -h$DBHOST -u$DBUSER -p$DBPWD -D$DBNAME -B -e "$QUERY" | $SED 's/\t/\",\"/g;s/^/\"/;s/$/\"/;s/\n//g'
 fi
-
 
 exit 0
