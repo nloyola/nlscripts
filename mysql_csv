@@ -53,6 +53,8 @@ while getopts "d:H:u:p:o:h" OPTION; do
     esac
 done
 
+QUERY=$1
+
 if [ -z "$DBUSER" ]; then
     echo "ERROR: user not specified"
     echo "$USAGE"
@@ -72,7 +74,7 @@ if [ -z "$DBNAME" ]; then
 fi
 
 if [ -z "$QUERY" ]; then
-    echo "ERROR: query name not specified"
+    echo "ERROR: query not specified"
     echo "$USAGE"
     exit
 fi
