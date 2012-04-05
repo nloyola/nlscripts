@@ -8,6 +8,7 @@ USAGE="
 Usage: $SCRIPT [OPTIONS] QRY
 
 OPTIONS
+  -d DBNAME   The name of the database.
   -H DBHOST   The hostname of the machine running the MySQL server. Defaults to
               localhost if not specified.
   -u DBUSER   The user to use on the MySQL server.
