@@ -23,9 +23,10 @@ AUDIOOUT="-acodec libmp3lame -ac 1 -ab 192k"
 AUDIOOUT="-acodec pcm_s16le"
 
 # x264
-VIDEOOUT="-vcodec libx264 -vpre lossless_ultrafast -threads 1"
+VIDEOOUT="-vcodec libx264 -preset ultrafast -threads 1"
 
-FFMPEG="ffmpeg $AUDIOGRAB $VIDEOGRAB $AUDIOOUT $VIDEOOUT $AVINAME"
+#FFMPEG="ffmpeg $AUDIOGRAB $VIDEOGRAB $AUDIOOUT $VIDEOOUT $AVINAME"
+FFMPEG="avconv $VIDEOGRAB $VIDEOOUT $AVINAME"
 
 echo "Recording in 3..."
 sleep 1
