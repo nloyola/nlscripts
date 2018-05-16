@@ -2,18 +2,23 @@
 
 usage() { echo "Usage: $0 [-s SOCKET_NAME] FILE1 .. FILEn" 1>&2; exit 1; }
 
+OPTS="-n -c"
 SOCKET=""
 
 while getopts ":s" o; do
     case "${o}" in
         s)
-            SOCKET="--socket-name=${OPTARGS}"
+            SOCKET="${OPTARGS}"
             ;;
         *)
             usage
             ;;
     esac
 done
+
+if [ ! -z "$SOCKET"]; then
+   OPTS="$OPTS --socket-name=$SOCKET -c"
+fi
 
 if [ -f $HOME/installs/bin/emacs ]; then
     EMACS_PATH=$HOME/installs/bin
@@ -36,5 +41,6 @@ if [ "$EMACS_PATH" == "" ]; then
     exit
 fi
 
-echo "socket: $SOCKET"
-$EMACS_PATH/emacsclient "$SOCKET" -a $EMACS_PATH/emacs -n $* &
+OPTS="$OPTS -a $EMACS_PATH/emacs"
+
+$EMACS_PATH/emacsclient $OPTS $* &
