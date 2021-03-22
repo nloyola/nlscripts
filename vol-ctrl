@@ -12,4 +12,4 @@ case "$1" in
             pamixer -d 2;;
     esac
 
-pkill -RTMIN+10 dwmblocks
+pkill -RTMIN+2 dwmblocks
