@@ -10,5 +10,10 @@
 
 LOCATION=Tollarp
 
+case $BUTTON in
+    2) setsid "alacritty" -t "scratchpad" -e zsh -c "curl -s wttr.in/$LOCATION; zsh" ;;
+esac
+
+
 DATA=$(curl -s wttr.in/$LOCATION?format=1)
 echo "${SEP1} ${DATA} ${SEP2}"
