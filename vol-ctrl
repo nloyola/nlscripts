@@ -1,15 +1,15 @@
 #!/bin/sh
 
-if [ ! -f /home/nelson/bin/pamixer ]; then
-    echo "ERROR: pamixer not found!"
+if [ ! -f /usr/bin/playerctl ]; then
+    echo "ERROR: playerctl not found!"
     exit 1
 fi
 
 case "$1" in
-        -i)
-            pamixer -i 2;;
-        -d)
-            pamixer -d 2;;
-    esac
+    -i)
+        playerctl volume 0.02+;;
+    -d)
+        playerctl volume 0.02-;;
+esac
 
 pkill -RTMIN+2 dwmblocks
