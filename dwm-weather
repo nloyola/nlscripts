@@ -11,7 +11,7 @@
 LOCATION=Tollarp
 
 case $BUTTON in
-    2) setsid "alacritty" -t "scratchpad" -e zsh -c "curl -s wttr.in/$LOCATION; zsh" ;;
+    2) setsid "alacritty" -t "scratchpad"  -o window.dimensions.columns=130 -o window.dimensions.lines=46 -e zsh -c "curl -s wttr.in/$LOCATION; zsh" ;;
 esac
 
 
