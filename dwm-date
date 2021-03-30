@@ -1,0 +1,7 @@
+#!/bin/bash
+
+d() {
+    echo -e "`date '+%a %b %d %I:%M%p'`"
+}
+
+echo " $(d)"

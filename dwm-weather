@@ -16,4 +16,4 @@ esac
 
 
 DATA=$(curl -s wttr.in/$LOCATION?format=1)
-echo "${SEP1} ${DATA} ${SEP2}"
+echo "${SEP1} ${DATA} ${SEP2}"

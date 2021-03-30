@@ -4,4 +4,4 @@ upgrades () {
     upgrds="$(aptitude search '~U' | wc -l)"
     echo " $upgrds"
 }
-echo " $(upgrades)"
+echo " $(upgrades)"

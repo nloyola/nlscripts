@@ -12,7 +12,7 @@ cpu() {
     cpu=$((100*( (total-prevtotal) - (idle-previdle) ) / (total-prevtotal) ))
     echo -e "  $cpu%"
 }
-echo " $(cpu)"
+echo " $(cpu)"
 
 case $BUTTON in
 	1) notify-send "CPU hogs" "$(ps axch -o cmd:15,%cpu --sort=-%cpu | sed 11q)" ;;
