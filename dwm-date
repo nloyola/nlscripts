@@ -1,7 +1,11 @@
 #!/bin/bash
 
-d() {
-    echo -e "`date '+%a %b %d %I:%M%p'`"
+theDate() {
+    echo -e "`date '+%a %b %d'`"
 }
 
-echo " $(d)"
+theTime() {
+    echo -e "`date '+%I:%M%p'`"
+}
+
+echo " $(theDate) $(theTime)"
