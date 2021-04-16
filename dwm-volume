@@ -15,21 +15,11 @@ case $BUTTON in
 	6) "$TERMINAL" -e "$EDITOR" "$0" ;;
 esac
 
-status="$(playerctl status 2>&1)"
-
-if [[ "$status" = "No players found" || "$status" = "Paused" ]]; then
-    echo 
-    exit
-fi
-
 # vol will be a number between 0 and 1
-vol="$(playerctl volume 2>&1)"
+vol="$(pulsemixer --get-volume | cut -d ' ' -f1)"
 
 # convert volume to percent
 #
-# divide by 1 to convert to integer
-vol=`echo "scale=0; 100 * $vol / 1" | bc -l`
-
 if [[ "$vol" -gt "70" ]]; then
 	icon=""
 elif [[ "$vol" -lt "30" ]]; then
