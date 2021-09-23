@@ -1,0 +1,6 @@
+#!/bin/bash
+
+# vol will be a number between 0 and 1
+vol="$(pulsemixer --get-volume | cut -d ' ' -f1)"
+
+echo "[$vol%]"
