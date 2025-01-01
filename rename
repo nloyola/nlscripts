@@ -1,4 +1,4 @@
-#!/usr/local/bin/perl -w
+#!/usr/bin/perl -w
 
 #rename - Larry's filename fixer
 $op = shift or die "Usage: rename expr [files]\n";
