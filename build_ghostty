@@ -1,0 +1,22 @@
+#!/bin/bash
+
+DEST=$HOME/src/github/ghostty
+ZIG=/usr/local/zig-linux-x86_64-0.13.0/zig
+
+if [[ ! -e "${ZIG}" ]]; then
+    echo "ERROR: zig not found at ${ZIG}"
+    exit 1
+fi
+
+if [[ -d "${DEST}.old" ]]; then
+    rm -rf "${DEST}.old"
+fi
+
+if [[ -d "${DEST}" ]]; then
+    mv "$DEST" "${DEST}.old"
+fi
+
+sudo apt install libgtk-4-dev libadwaita-1-dev git
+git clone https://github.com/ghostty-org/ghostty "$DEST"
+cd "$DEST"
+sudo $ZIG build -p /usr/local -Doptimize=ReleaseFast

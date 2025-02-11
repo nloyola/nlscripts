@@ -1,0 +1,22 @@
+#!/bin/bash
+
+DEST=$HOME/src/emacs/emacs
+
+if [[ -d "${DEST}.old" ]]; then
+    rm -rf "${DEST}.old"
+fi
+
+if [[ -d "${DEST}" ]]; then
+    mv "$DEST" "${DEST}.old"
+fi
+
+sudo apt install -y build-essential
+git clone --depth 1 https://git.savannah.gnu.org/git/emacs.git "$DEST"
+cd "$DEST"
+./autogen.sh
+./configure --prefix=/usr/local --with-native-compilation=aot --with-modules --with-json \
+            --with-cairo --with-imagemagick --with-rsvg --with-gif --with-png --with-jpeg \
+            --with-tree-sitter --without-compress-install \
+            CC=gcc-10 CFLAGS="-O3 -mtune=native -march=native -fomit-frame-pointer"
+make -j8
+sudo make install
