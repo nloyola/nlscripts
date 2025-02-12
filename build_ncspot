@@ -1,0 +1,18 @@
+#!/bin/bash
+
+DEST=$HOME/src/github/music/ncspot
+
+if [[ -d "${DEST}.old" ]]; then
+    rm -rf "${DEST}.old"
+fi
+
+if [[ -d "${DEST}" ]]; then
+    mv "$DEST" "${DEST}.old"
+fi
+
+sudo apt install libdbus-1-dev libncursesw5-dev libpulse-dev libssl-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+git clone https://github.com/hrkfdn/ncspot.git "$DEST"
+cd "$DEST"
+rustup update stable
+cargo build --release
+cp target/release/ncspot ~/.cargo/bin/ncspot
