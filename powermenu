@@ -1,0 +1,16 @@
+#!/bin/sh
+
+# Power menu script using tofi
+
+#CHOSEN=$(printf "󰒲 Suspend\n  Power Off\n  Restart\n  Lock" | rofi -dmenu -p "power menu")
+CHOSEN=$(printf "Suspend\nPower Off\nRestart\nLock\nLogout" | rofi -dmenu -p "Power Menu
+")
+
+case "$CHOSEN" in
+	"Lock") i3lock ;;
+	"Suspend") sudo systemctl suspend ;;
+	"Reboot") sudo reboot ;;
+	"Shutdown") sudo poweroff ;;
+	"Log Out") loginctl terminate-user $USER ;;
+	*) exit 1 ;;
+esac
