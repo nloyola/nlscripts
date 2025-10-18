@@ -14,5 +14,6 @@ sudo apt install libdbus-1-dev libncursesw5-dev libpulse-dev libssl-dev libxcb1-
 git clone https://github.com/hrkfdn/ncspot.git "$DEST"
 cd "$DEST"
 rustup update stable
+cargo update
 cargo build --release
 cp target/release/ncspot ~/.cargo/bin/ncspot

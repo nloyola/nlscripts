@@ -1,6 +1,17 @@
 #!/bin/bash
 
 DEST=$HOME/src/emacs/emacs
+PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH
+LD_LIBRARY_PATH=/usr/local/lib/
+REPO=https://github.com/emacs-mirror/emacs.git
+
+#CC=gcc-10
+CC=gcc
+CFLAGS_MINE="-O3 -mtune=native -march=native -fomit-frame-pointer"
+
+# these settings come from here:
+#   https://github.com/D4lj337/Emacs-performance
+CFLAGS_MAD_SCIENTIST="-march=native -Ofast -fno-finite-math-only -pipe-fgraphite-identity -floop-nest-optimize -fdevirtualize-at-ltrans -fipa-pta -fno-semantic-interposition"
 
 if [[ -d "${DEST}.old" ]]; then
     rm -rf "${DEST}.old"
@@ -10,13 +21,35 @@ if [[ -d "${DEST}" ]]; then
     mv "$DEST" "${DEST}.old"
 fi
 
+# 1. Make sure system sees /usr/local/lib
+echo ">>> Ensuring /usr/local/lib is in ldconfig paths..."
+echo "/usr/local/lib" | sudo tee /etc/ld.so.conf.d/tree-sitter.conf >/dev/null
+sudo ldconfig
+
 sudo apt install -y build-essential
-git clone --depth 1 https://git.savannah.gnu.org/git/emacs.git "$DEST"
+git clone --depth 1 "$REPO" "$DEST"
 cd "$DEST"
+make distclean || true
 ./autogen.sh
-./configure --prefix=/usr/local --with-native-compilation=aot --with-modules --with-json \
-            --with-cairo --with-imagemagick --with-rsvg --with-gif --with-png --with-jpeg \
-            --with-tree-sitter --without-compress-install \
-            CC=gcc-10 CFLAGS="-O3 -mtune=native -march=native -fomit-frame-pointer"
+./configure --prefix=/usr/local \
+            --with-x-toolkit=lucid \
+            --with-xft \
+            --with-xaw3d \
+            --without-toolkit-scroll-bars \
+            --without-gsettings \
+            --with-gconf \
+            --with-mailutils \
+            --with-native-compilation=aot \
+	    --with-modules \
+            --with-json \
+            --with-cairo \
+	    --with-imagemagick \
+	    --with-rsvg \
+	    --with-gif \
+	    --with-png \
+	    --with-jpeg \
+            --with-tree-sitter \
+	    --without-compress-install \
+            CC=$CC CFLAGS="$CFLAGS_MAD_SCIENTIST"
 make -j8
 sudo make install
