@@ -1,3 +1,18 @@
-#!/bin/sh
+#!/bin/bash
+export DISPLAY=':1'
 
-DISPLAY=':1' /usr/bin/feh --randomize --bg-fill $HOME/Dropbox/wallpapers/* $HOME/wallpapers/*
+dirs=("$HOME/Dropbox/Nelson-Share/wallpapers" "$HOME/wallpapers")
+files=("${dirs[0]}"/* "${dirs[1]}"/*)
+
+# Two random wallpapers
+wall1="${files[RANDOM % ${#files[@]}]}"
+wall2="${files[RANDOM % ${#files[@]}]}"
+
+# Set different wallpapers per monitor
+/usr/bin/feh --bg-fill "$wall1" "$wall2"
+
+# Generate colors from the first wallpaper, but don’t reset wallpaper
+wal --backend colorz -n -i "$wall1"
+
+# Apply updated colors
+xrdb -merge ~/.cache/wal/colors.Xresources
