@@ -282,11 +282,12 @@ if is_wsl; then
 else
     configure_args=(
         --prefix=/usr/local
-        --with-x-toolkit=lucid
+        --with-x-toolkit=gtk3
         --with-xft
         --without-toolkit-scroll-bars
         --without-gsettings
         --with-mailutils
+        --with-harfbuzz
         --with-native-compilation=aot
         --with-modules
         --with-json

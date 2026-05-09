@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-export DISPLAY=':1'
+export DISPLAY=':0'
 
-dirs=("$HOME/Dropbox/Nelson-Share/wallpapers" "$HOME/wallpapers")
+dirs=("$HOME/Dropbox/wallpapers" "$HOME/wallpapers")
 files=("${dirs[0]}"/* "${dirs[1]}"/*)
 
 # Two random wallpapers
