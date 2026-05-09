@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 DEST=$HOME/src/github/ghostty
 ZIG=/usr/local/zig-linux-x86_64-0.13.0/zig

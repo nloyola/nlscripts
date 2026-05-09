@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 DEST=$HOME/.local/share/fonts
 mkdir -p $DEST

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 DEST=$HOME/src/github/music/ncspot
 

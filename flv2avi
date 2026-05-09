@@ -1,23 +1,30 @@
-#!/bin/sh
+#!/usr/bin/env bash
+set -euo pipefail
 
-if [ -z "$1" ]; then
-    echo "Usage: $0 list_of_flv_files"
+usage() {
+    echo "Usage: $(basename "$0") FILE.flv [FILE2.flv ...]"
+    echo "Convert FLV files to AVI using ffmpeg."
+}
+
+if [ $# -eq 0 ]; then
+    usage >&2
     exit 1
 fi
 
-# video encoding bit rate
-V_BITRATE=800
+if ! command -v ffmpeg >/dev/null 2>&1; then
+    echo "ERROR: ffmpeg is required" >&2
+    exit 127
+fi
 
-MENC_OPTS="-ovc xvid -xvidencopts bitrate=$V_BITRATE:autoaspect"
-
-# audio to mp3
-AUDIO="-oac mp3lame -lameopts fast:preset=standard"
-
-while [ "$1" ]; do
-    if file "$1" | grep -q "Macromedia Flash Video"; then
-        mencoder "$1" $MENC_OPTS -vf pp=lb  $AUDIO -o "`basename $1 .flv`.avi"
-    else
-        echo "$1 is not Flash Video. Skipping"
+for infile in "$@"; do
+    if [ ! -f "$infile" ]; then
+        echo "Skipping missing file: $infile" >&2
+        continue
     fi
-    shift
+
+    outfile="${infile%.*}.avi"
+    ffmpeg -hide_banner -i "$infile" \
+        -c:v mpeg4 -q:v 4 \
+        -c:a libmp3lame -q:a 2 \
+        "$outfile"
 done

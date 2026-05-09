@@ -1,0 +1,86 @@
+#!/usr/bin/env -S perl -w
+
+use Mail::POP3Client;
+
+my %pop3server =
+    (
+     'dido' =>
+     {
+      'user' => 'nloyola',
+      'pwd'  => 'nelxrs24'
+     },
+
+     'pop.gmail.com' =>
+     {
+      'user' => 'nloyola@gmail.com',
+      'pwd'  => 'aztec24'
+     },
+
+     'shawmail.ed.shawcable.net' =>
+     {
+      'user' => 'nloyola',
+      'pwd'  => 'nelxrs24'
+     }
+    );
+
+sub accountCheck
+{
+    my $server = shift;
+    my $user   = shift;
+    my $pwd    = shift;
+
+    #print "server/", $server, " user/", $user, " pwd/", $pwd, "\n";
+
+    my $pop = new Mail::POP3Client (USER     => $user,
+                                    PASSWORD => $pwd,
+                                    HOST     => $server);
+                                    #DEBUG => 1);
+
+    print $pop->Count() . " message(s) on " . $server . "\n";
+
+    if ($pop->Count() == -1) { return };
+
+    for ($i = 1; $i <= $pop->Count(); $i++)
+    {
+        foreach ( $pop->Head( $i ) )
+        {
+            /^(From|Subject):\s+/i and print "  ", $_, "\n";
+        }
+        print "\n";
+    }
+}
+
+sub accountsCheckAll
+{
+    foreach my $server (sort (keys %pop3server))
+    {
+        accountCheck ($server, $pop3server {$server} {'user'},
+                      $pop3server {$server} {'pwd'});
+    }
+}
+
+if ($#ARGV < 0)
+{
+    accountsCheckAll ();
+    exit;
+}
+
+#print $#ARGV, "\n";
+
+if (defined ($ARGV [0]))
+{
+    if ($ARGV [0] eq 'all')
+    {
+        accountsCheckAll ();
+    }
+    else
+    {
+        if (! defined ($pop3server {$ARGV [0]}))
+        {
+            die "no information for server ", $ARGV [0], "\n";
+        }
+
+        accountCheck ($ARGV[0], $pop3server {$ARGV[0]} {'user'},
+                      $pop3server {$ARGV[0]} {'pwd'});
+    }
+}

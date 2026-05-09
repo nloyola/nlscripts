@@ -1,5 +1,1 @@
-#!/usr/local/bin/bash
- 
-cd /usr/local/installs/azureus
-./azureus $@ 2> /dev/null &
-
+archive/azureus

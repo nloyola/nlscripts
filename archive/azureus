@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cat >&2 <<'EOF'
+Azureus/Vuze launcher retired.
+
+Azureus is obsolete and the old install path /usr/local/installs/azureus is no
+longer portable. Use a maintained BitTorrent client instead, for example:
+  qbittorrent "$@"
+  transmission-gtk "$@"
+EOF
+exit 1

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 usage() { echo "Usage: $0 [-s SOCKET_NAME] FILE1 .. FILEn" 1>&2; exit 1; }
 

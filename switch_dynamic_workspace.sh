@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # switch_dynamic_workspace.sh
 # Argument $1 is the key number (1-9)
 # Argument $2 is the optional i3 command (e.g., "move container to" or "workspace")

@@ -1,75 +1,58 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-usage="usage: $0 in_file"
+usage() {
+    echo "Usage: $(basename "$0") [-c] INPUT [OUTPUT]"
+    echo "Encode a video with ffmpeg using H.264/AAC."
+    echo "  -c    compatibility mode: AVI container with MPEG-4 video/MP3 audio"
+}
 
-if [ "$1" == "" ]; then
-    echo $usage;
-    exit
-fi
-
-while getopts ":c" options; do
-  case $options in
-    c ) canon=1;;
-    \? ) echo $usage
-         exit 1;;
-    * ) echo $usage
-          exit 1;;
-
-  esac
+compat=0
+while getopts ":ch" opt; do
+    case "$opt" in
+        c) compat=1 ;;
+        h) usage; exit 0 ;;
+        *) usage >&2; exit 1 ;;
+    esac
 done
+shift $((OPTIND - 1))
 
-shift $(($OPTIND - 1))
-
-ext=${1##*.}
-
-if [ "$ext" != "avi" -a "$ext" != "dv" ]; then
-    echo "$1 is not an avi or dv file"
-    exit
+if [ $# -lt 1 ] || [ $# -gt 2 ]; then
+    usage >&2
+    exit 1
 fi
 
-outfile="${1##*/}"
-outfile="${1%%.*}-xvid.avi"
+if ! command -v ffmpeg >/dev/null 2>&1; then
+    echo "ERROR: ffmpeg is required" >&2
+    exit 127
+fi
 
+infile=$1
+if [ ! -f "$infile" ]; then
+    echo "ERROR: input file not found: $infile" >&2
+    exit 1
+fi
 
-MSG_LEVEL="-msglevel all=5"
-VIDEO_BITRATE="1150"
-# XVID_OPTS="bitrate=$VIDEO_BITRATE:vhq=4"
-XVID_OPTS="bitrate=$VIDEO_BITRATE:chroma_opt:vhq=4:bvhq=1:quant_type=mpeg"
-#XVID="-ovc xvid -vf pp=fd -xvidencopts $XVID_OPTS"
-XVID="-ovc xvid -xvidencopts $XVID_OPTS"
-
-
-function canon() {
-    #mencoder $1 -o $2 -oac copy -ovc lavc -srate 11025 -channels 1 -af-adv force=1 -lavcopts vcodec=mpeg4:vbitrate=496:vpass=1 -vf harddup
-
-    #mencoder $1 -o $2 -oac copy -ovc lavc -srate 11025 -channels 1 -af-adv force=1 -lavcopts vcodec=mpeg4:mbd=2:trell:vbitrate=496:vpass=2 -vf harddup
-
-    mencoder $1 -o $2 -oac copy $XVID:pass=1 $MSG_LEVEL
-    mencoder $1 -o $2 -oac copy $XVID:pass=2 $MSG_LEVEL
-}
-
-function camera() {
-    AUDIO_BITRATE="192"
-
-    #LAME_OPTS="vbr=3"
-    #LAME="-oac mp3lame -lameopts $LAME_OPTS -srate 8000"
-    LAME="-oac copy"
-
-
-    mencoder $1 $LAME $XVID:pass=1 -o /dev/null $MSG_LEVEL #-endpos 180
-    mencoder $1 $LAME $XVID:pass=2 -o $2 $MSG_LEVEL #-endpos 180
-
-    if [ -f divx2pass.log ];  then
-        rm divx2pass.log
+if [ $# -eq 2 ]; then
+    outfile=$2
+else
+    base=${infile%.*}
+    if [ "$compat" -eq 1 ]; then
+        outfile="${base}-encoded.avi"
+    else
+        outfile="${base}-encoded.mp4"
     fi
-}
-
-if [ "$canon" == "1" ]; then
-    canon $1 $outfile
-    exit 0
 fi
 
-camera $1 $outfile
-
-# encode into flash video
-# mencoder orig_file.ext -ofps 25 -o dest_file.flv -of lavf -oac mp3lame -lameopts abr:br=64 -srate 22050 -ovc lavc -lavfopts i_certify_that_my_video_stream_does_not_use_b_frames -lavcopts vcodec=flv:keyint=50:vbitrate=300:mbd=2:mv0:trell:v4mv:cbp:last_pred=3 -vop scale=320:240
+if [ "$compat" -eq 1 ]; then
+    ffmpeg -hide_banner -i "$infile" \
+        -c:v mpeg4 -q:v 4 \
+        -c:a libmp3lame -q:a 2 \
+        "$outfile"
+else
+    ffmpeg -hide_banner -i "$infile" \
+        -c:v libx264 -preset medium -crf 23 \
+        -c:a aac -b:a 160k \
+        -movflags +faststart \
+        "$outfile"
+fi

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # 1. Clear existing mappings
 setxkbmap -option ""
 # 2. Force the swap and set F-keys to standard mode

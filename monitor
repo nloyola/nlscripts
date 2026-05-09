@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 export DISPLAY=:0.0
 
 if [ $# -eq 0 ]; then

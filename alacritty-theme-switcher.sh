@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 THEME_DIR="$HOME/.config/alacritty/themes/themes"
 CONFIG_FILE="$HOME/.config/alacritty/alacritty.yml"
