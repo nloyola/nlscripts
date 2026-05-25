@@ -17,6 +17,31 @@ set -euo pipefail
 ACTION="${1:-}"
 VPN_PEER="130.237.242.68"
 STATE_FILE="/tmp/vpn.sh.state"
+RESOLV_BACKUP="/tmp/vpn.sh.resolv.conf"
+
+save_resolv_conf() {
+  sudo cp /etc/resolv.conf "$RESOLV_BACKUP" 2>/dev/null || true
+  sudo chown "$(id -u):$(id -g)" "$RESOLV_BACKUP" 2>/dev/null || true
+}
+
+restore_resolv_conf() {
+  if [[ -s "$RESOLV_BACKUP" ]]; then
+    sudo cp "$RESOLV_BACKUP" /etc/resolv.conf 2>/dev/null || true
+  elif [[ -s /run/NetworkManager/resolv.conf ]]; then
+    sudo cp /run/NetworkManager/resolv.conf /etc/resolv.conf 2>/dev/null || true
+  fi
+  rm -f "$RESOLV_BACKUP"
+}
+
+wait_vpn_stopped() {
+  local status
+  for _ in {1..3}; do
+    status="$(timeout 2 /opt/forticlient/fortivpn status 2>&1 || true)"
+    grep -q "Status: Not Running" <<<"$status" && return 0
+    sleep 1
+  done
+  return 1
+}
 
 save_default_route() {
   local line gw dev
@@ -28,20 +53,107 @@ save_default_route() {
   printf 'GATEWAY=%s\nDEVICE=%s\n' "$gw" "$dev" > "$STATE_FILE"
 }
 
+docker_bridge_routes() {
+  docker network ls -q 2>/dev/null \
+    | xargs -r docker network inspect \
+        --format '{{.Id}}{{"\t"}}{{range .IPAM.Config}}{{.Subnet}}{{end}}{{"\t"}}{{(index .Options "com.docker.network.bridge.name")}}' 2>/dev/null \
+    | while IFS=$'\t' read -r id subnet bridge; do
+        [[ -n "$subnet" ]] || continue
+        if [[ -z "$bridge" || "$bridge" == "<no value>" ]]; then
+          bridge="br-${id:0:12}"
+        fi
+        [[ -d "/sys/class/net/$bridge" ]] || continue
+        printf '%s\t%s\n' "$subnet" "$bridge"
+      done
+}
+
+pin_docker_routes() {
+  local subnet iface
+  while IFS=$'\t' read -r subnet iface; do
+    [[ -n "$subnet" && -n "$iface" ]] || continue
+    sudo ip route replace "$subnet" dev "$iface" 2>/dev/null || true
+  done < <(docker_bridge_routes)
+}
+
+default_route_source() {
+  ip -4 route show default | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}'
+}
+
+configure_docker_vpn_nat() {
+  local vpn_source subnet iface
+  vpn_source="$(default_route_source)"
+  [[ -n "$vpn_source" ]] || return 0
+  printf 'VPN_SOURCE=%q\n' "$vpn_source" >> "$STATE_FILE"
+
+  # Remove any older vpn.sh rules first. Stale rules can reference deleted
+  # Docker bridges, and rules without the localhost exclusion break published
+  # ports reached through http://localhost:PORT/ while the VPN is up.
+  remove_docker_vpn_nat
+
+  while IFS=$'\t' read -r subnet iface; do
+    [[ -n "$subnet" && -n "$iface" ]] || continue
+    sudo iptables -t nat -C POSTROUTING -s "$subnet" ! -d 127.0.0.0/8 ! -o "$iface" \
+      -m comment --comment vpn.sh-docker-vpn -j SNAT --to-source "$vpn_source" 2>/dev/null \
+      || sudo iptables -t nat -I POSTROUTING 1 -s "$subnet" ! -d 127.0.0.0/8 ! -o "$iface" \
+        -m comment --comment vpn.sh-docker-vpn -j SNAT --to-source "$vpn_source" 2>/dev/null || true
+  done < <(docker_bridge_routes)
+}
+
+remove_docker_vpn_nat() {
+  # Delete all rules managed by this script, including stale rules for Docker
+  # bridges that no longer exist.
+  while read -r rule; do
+    [[ -n "$rule" ]] || continue
+    sudo timeout 5 bash -c "iptables -w 2 -t nat ${rule/-A POSTROUTING/-D POSTROUTING}" 2>/dev/null || true
+  done < <(sudo iptables -t nat -S POSTROUTING 2>/dev/null | grep -- 'vpn.sh-docker-vpn' || true)
+}
+
+remove_vpn_source_addr() {
+  [[ -n "${VPN_SOURCE:-}" ]] || return 0
+
+  ip -o -4 addr show | awk -v ip="$VPN_SOURCE" '$4 == ip "/32" {print $2}' \
+    | while read -r iface; do
+        [[ -n "$iface" ]] || continue
+        sudo ip addr del "$VPN_SOURCE/32" dev "$iface" 2>/dev/null || true
+      done
+}
+
+remove_stale_vpn_addrs() {
+  # FortiClient can leave its assigned /32 behind after suspend/resume. If that
+  # stale address remains, the next IPsec setup may be brought down immediately.
+  ip -o -4 addr show scope global \
+    | awk '$4 ~ /^10[.]240[.].*\/32$/ && $2 !~ /^(lo|docker|br-|tun|ppp)/ {print $2, $4}' \
+    | while read -r iface cidr; do
+        [[ -n "$iface" && -n "$cidr" ]] || continue
+        sudo ip addr del "$cidr" dev "$iface" 2>/dev/null || true
+      done
+}
+
 restore_routes() {
-  [[ -f "$STATE_FILE" ]] || return 0
-  local GATEWAY="" DEVICE=""
+  remove_docker_vpn_nat
+  if [[ ! -f "$STATE_FILE" ]]; then
+    remove_stale_vpn_addrs
+    restore_resolv_conf
+    return 0
+  fi
+  local GATEWAY="" DEVICE="" VPN_SOURCE=""
   # shellcheck disable=SC1090
   source "$STATE_FILE"
   sudo ip route del "$VPN_PEER/32" 2>/dev/null || true
-  if [[ -z "$(ip -4 route show default)" && -n "$GATEWAY" && -n "$DEVICE" ]]; then
-    sudo ip route add default via "$GATEWAY" dev "$DEVICE"
+  remove_docker_vpn_nat
+  remove_vpn_source_addr
+  remove_stale_vpn_addrs
+  if [[ -n "$GATEWAY" && -n "$DEVICE" ]]; then
+    sudo ip route replace default via "$GATEWAY" dev "$DEVICE"
   fi
+  restore_resolv_conf
   rm -f "$STATE_FILE"
 }
 
 case "$ACTION" in
   connect)
+    remove_stale_vpn_addrs
+    save_resolv_conf
     if ! save_default_route; then
       echo "vpn.sh: no default route found; cannot determine gateway." >&2
       exit 1
@@ -53,6 +165,7 @@ case "$ACTION" in
     # restore routes so the user isn't left offline.
     trap restore_routes EXIT
 
+    pin_docker_routes
     sudo ip route replace "$VPN_PEER/32" via "$GATEWAY" dev "$DEVICE"
     sudo ip route del default 2>/dev/null || true
 
@@ -80,6 +193,9 @@ case "$ACTION" in
 
     if [[ $rc -eq 0 ]]; then
       trap - EXIT
+      # Re-pin Docker routes and SNAT container traffic to the VPN source address.
+      pin_docker_routes
+      configure_docker_vpn_nat
       echo "vpn.sh: VPN connected. Run 'vpn.sh disconnect' to tear down and restore routes."
     else
       echo "vpn.sh: connect failed; restoring routes." >&2
@@ -87,7 +203,8 @@ case "$ACTION" in
     fi
     ;;
   disconnect)
-    /opt/forticlient/fortivpn disconnect || pkill fortivpn || true
+    timeout 5 /opt/forticlient/fortivpn disconnect || pkill fortivpn || true
+    wait_vpn_stopped || pkill fortivpn || true
     restore_routes
     echo "VPN Disconnected."
     ;;
