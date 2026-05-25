@@ -1,12 +1,57 @@
 #!/usr/bin/env bash
+set -euo pipefail
 
 DEST=$HOME/src/github/ghostty
-ZIG=/usr/local/zig-linux-x86_64-0.13.0/zig
+REPO=https://github.com/ghostty-org/ghostty
+ZIG=/usr/local/bin/zig
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
-if [[ ! -e "${ZIG}" ]]; then
-    echo "ERROR: zig not found at ${ZIG}"
-    exit 1
-fi
+install_build_dependencies() {
+    echo ">>> Updating apt package metadata..."
+    sudo apt update
+
+    echo ">>> Installing build dependencies..."
+    sudo apt install -y \
+        git \
+        curl \
+        xz-utils \
+        libgtk-4-dev \
+        libadwaita-1-dev \
+        blueprint-compiler \
+        gettext \
+        pkg-config
+}
+
+required_zig_version() {
+    # Extract minimum_zig_version from ghostty's build.zig.zon.
+    local zon="${DEST}/build.zig.zon"
+    if [[ ! -f "$zon" ]]; then
+        echo "ERROR: ${zon} not found." >&2
+        exit 1
+    fi
+    local version
+    version=$(grep -E 'minimum_zig_version' "$zon" \
+        | head -n1 \
+        | sed -E 's/.*"([^"]+)".*/\1/')
+    if [[ -z "$version" ]]; then
+        echo "ERROR: could not parse minimum_zig_version from ${zon}." >&2
+        exit 1
+    fi
+    echo "$version"
+}
+
+ensure_zig() {
+    local version="$1"
+    echo ">>> Ensuring zig ${version} via install_zig..."
+    "${SCRIPT_DIR}/install_zig" "$version"
+
+    if [[ ! -x "${ZIG}" ]]; then
+        echo "ERROR: zig not found at ${ZIG} after install_zig ran." >&2
+        exit 1
+    fi
+}
+
+install_build_dependencies
 
 if [[ -d "${DEST}.old" ]]; then
     rm -rf "${DEST}.old"
@@ -16,7 +61,11 @@ if [[ -d "${DEST}" ]]; then
     mv "$DEST" "${DEST}.old"
 fi
 
-sudo apt install libgtk-4-dev libadwaita-1-dev git
-git clone https://github.com/ghostty-org/ghostty "$DEST"
+git clone --depth 1 "$REPO" "$DEST"
+
+ZIG_VERSION=$(required_zig_version)
+echo ">>> ghostty requires zig ${ZIG_VERSION}."
+ensure_zig "$ZIG_VERSION"
+
 cd "$DEST"
-sudo $ZIG build -p /usr/local -Doptimize=ReleaseFast
+sudo "$ZIG" build -p /usr/local -Doptimize=ReleaseFast

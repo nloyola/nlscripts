@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Download and install a zig release to /usr/local, updating the
+# /usr/local/bin/zig symlink.
+#
+# Usage:
+#   install_zig            # installs the latest stable release
+#   install_zig <version>  # installs the specified version (e.g. 0.15.2)
+
+INDEX_URL=https://ziglang.org/download/index.json
+PREFIX=/usr/local
+SYMLINK=${PREFIX}/bin/zig
+
+ARCH=$(uname -m)
+OS=linux
+PLATFORM_KEY="${ARCH}-${OS}"
+
+REQUESTED_VERSION="${1:-}"
+
+current_version() {
+    if [[ -x "${SYMLINK}" ]]; then
+        "${SYMLINK}" version 2>/dev/null || true
+    fi
+}
+
+fetch_release_info() {
+    # Prints "<version> <tarball-url>" for the requested version, or the
+    # latest stable release if no version was requested.
+    local requested="$1"
+    curl -fsSL "$INDEX_URL" | REQUESTED="$requested" python3 -c "
+import json, os, sys
+requested = os.environ.get('REQUESTED', '')
+data = json.load(sys.stdin)
+if requested:
+    info = data.get(requested)
+    if not info:
+        sys.exit('ERROR: zig version ' + requested + ' not found in index')
+    entry = info.get('${PLATFORM_KEY}')
+    if not entry:
+        sys.exit('ERROR: no ${PLATFORM_KEY} build for zig ' + requested)
+    print(requested, entry['tarball'])
+else:
+    # First top-level key that isn't 'master' is the latest stable.
+    for version, info in data.items():
+        if version == 'master':
+            continue
+        entry = info.get('${PLATFORM_KEY}')
+        if not entry:
+            sys.exit('ERROR: no ${PLATFORM_KEY} build for zig ' + version)
+        print(version, entry['tarball'])
+        break
+"
+}
+
+read -r TARGET_VERSION TARBALL_URL < <(fetch_release_info "$REQUESTED_VERSION")
+
+if [[ -z "${TARGET_VERSION:-}" ]]; then
+    echo "ERROR: could not determine zig version to install." >&2
+    exit 1
+fi
+
+CURRENT=$(current_version)
+if [[ "$CURRENT" == "$TARGET_VERSION" ]]; then
+    echo ">>> zig ${TARGET_VERSION} already installed at ${SYMLINK}."
+    exit 0
+fi
+
+echo ">>> Current zig: ${CURRENT:-none}"
+echo ">>> Installing zig ${TARGET_VERSION}..."
+
+TARBALL=$(basename "$TARBALL_URL")
+EXTRACT_DIR="${TARBALL%.tar.xz}"
+INSTALL_DIR="${PREFIX}/${EXTRACT_DIR}"
+
+if [[ -d "$INSTALL_DIR" && -x "${INSTALL_DIR}/zig" ]]; then
+    echo ">>> Reusing existing install at ${INSTALL_DIR}."
+else
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+
+    pushd "$tmp" >/dev/null
+    curl -fsSL "$TARBALL_URL" -o "$TARBALL"
+    tar -xf "$TARBALL"
+
+    if [[ ! -d "$EXTRACT_DIR" ]]; then
+        echo "ERROR: expected directory ${EXTRACT_DIR} after extracting ${TARBALL}." >&2
+        exit 1
+    fi
+
+    sudo rm -rf "$INSTALL_DIR"
+    sudo mv "$EXTRACT_DIR" "$INSTALL_DIR"
+    popd >/dev/null
+fi
+
+sudo ln -sfn "${INSTALL_DIR}/zig" "${SYMLINK}"
+
+echo ">>> Installed $("${SYMLINK}" version) -> ${INSTALL_DIR}"
