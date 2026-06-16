@@ -8,6 +8,10 @@ REPO=https://github.com/emacs-mirror/emacs.git
 HAVE_GCONF=0
 HAVE_XAW3D=0
 
+# Set EMACS_NOX=1 for a headless / terminal-only build (no X11, GTK, or image
+# libraries). Native compilation and tree-sitter are still enabled.
+NOX=${EMACS_NOX:-0}
+
 #CC=gcc-10
 CC=gcc
 CFLAGS_MINE="-O3 -mtune=native -march=native -fomit-frame-pointer"
@@ -83,25 +87,31 @@ install_build_dependencies() {
         cmake
         curl
         git
-        libgif-dev
         libgnutls28-dev
-        libharfbuzz-dev
         libjansson-dev
-        libjpeg-dev
         libmailutils-dev
-        libmagickwand-dev
         libncurses-dev
-        libpng-dev
-        librsvg2-dev
-        libtiff-dev
         libtree-sitter-dev
-        libx11-dev
-        libxft-dev
         libxml2-dev
-        libxpm-dev
         pkg-config
         texinfo
     )
+
+    # X11, GTK, and image libraries are only needed for a GUI build.
+    if [[ "$NOX" -ne 1 ]]; then
+        packages+=(
+            libgif-dev
+            libharfbuzz-dev
+            libjpeg-dev
+            libmagickwand-dev
+            libpng-dev
+            librsvg2-dev
+            libtiff-dev
+            libx11-dev
+            libxft-dev
+            libxpm-dev
+        )
+    fi
 
     if is_wsl; then
         packages+=(
@@ -134,7 +144,7 @@ install_build_dependencies() {
         echo ">>> No tree-sitter runtime package found in apt; will rely on source install."
     fi
 
-    if ! is_wsl; then
+    if ! is_wsl && [[ "$NOX" -ne 1 ]]; then
         if apt_has_package libgconf2-dev; then
             packages+=("libgconf2-dev")
             HAVE_GCONF=1
@@ -278,6 +288,19 @@ if is_wsl; then
         --with-xft
         --with-xml2
         --with-pgtk
+    )
+elif [[ "$NOX" -eq 1 ]]; then
+    configure_args=(
+        --prefix=/usr/local
+        --without-x
+        --with-mailutils
+        --with-native-compilation=aot
+        --with-modules
+        --with-json
+        --with-tree-sitter
+        --with-gnutls
+        --with-zlib
+        --without-compress-install
     )
 else
     configure_args=(
