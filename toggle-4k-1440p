@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+LEFT="DP-0"
+RIGHT="DP-2"
+
+# Find the current geometry token for the left monitor, e.g. 3840x2160+0+0
+current_left=$(xrandr --query | awk -v out="$LEFT" '
+  $1 == out {
+    for (i = 1; i <= NF; i++) {
+      if ($i ~ /^[0-9]+x[0-9]+\+[0-9]+\+[0-9]+$/) {
+        print $i
+        exit
+      }
+    }
+  }
+')
+
+if [[ "$current_left" == 3840x2160+0+0 ]]; then
+  echo "Switching $LEFT to 2560x1440; keeping $RIGHT at 3840x2160..."
+  xrandr \
+    --output "$LEFT" --mode 2560x1440 --pos 0x0 --primary \
+    --output "$RIGHT" --mode 3840x2160 --pos 2560x0
+else
+  echo "Switching $LEFT to 3840x2160; keeping $RIGHT at 3840x2160..."
+  xrandr \
+    --output "$LEFT" --mode 3840x2160 --pos 0x0 --primary \
+    --output "$RIGHT" --mode 3840x2160 --pos 3840x0
+fi
