@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+AIRPODS_MAC="${AIRPODS_MAC:-30:82:16:8B:EC:52}"
+AIRPODS_NAME="${AIRPODS_NAME:-AirPods Pro JA}"
+TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-20}"
+
+log() {
+  printf '%s\n' "$*"
+}
+
+have() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+start_bluetooth() {
+  log "Starting Bluetooth..."
+
+  if systemctl is-active --quiet bluetooth; then
+    log "Bluetooth service is already running."
+  elif systemctl start bluetooth 2>/dev/null; then
+    log "Bluetooth service started."
+  elif have sudo; then
+    sudo systemctl start bluetooth
+    log "Bluetooth service started with sudo."
+  else
+    log "Could not start bluetooth.service. Try: sudo systemctl start bluetooth"
+    return 1
+  fi
+
+  rfkill unblock bluetooth 2>/dev/null || true
+  bluetoothctl power on >/dev/null
+  bluetoothctl agent on >/dev/null || true
+  bluetoothctl default-agent >/dev/null || true
+}
+
+known_device() {
+  bluetoothctl devices | grep -qiE "^Device ${AIRPODS_MAC//:/:} |${AIRPODS_NAME}"
+}
+
+connected() {
+  bluetoothctl info "$AIRPODS_MAC" 2>/dev/null | grep -q "Connected: yes"
+}
+
+audio_card_visible() {
+  pactl list cards short 2>/dev/null | grep -qi "bluez_card.${AIRPODS_MAC//:/_}"
+}
+
+audio_sink_visible() {
+  pactl list sinks short 2>/dev/null | grep -qi "bluez_.*${AIRPODS_MAC//:/_}"
+}
+
+wait_for_audio() {
+  local waited=0
+
+  while (( waited < TIMEOUT_SECONDS )); do
+    if connected && { audio_card_visible || audio_sink_visible; }; then
+      return 0
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+
+  return 1
+}
+
+connect_airpods() {
+  if ! known_device; then
+    log "AirPods are not known to this computer. Pair them first."
+    log "Expected: $AIRPODS_NAME ($AIRPODS_MAC)"
+    return 2
+  fi
+
+  bluetoothctl trust "$AIRPODS_MAC" >/dev/null || true
+
+  if connected && { audio_card_visible || audio_sink_visible; }; then
+    log "AirPods are already connected and visible to PulseAudio/PipeWire."
+    return 0
+  fi
+
+  if connected; then
+    log "AirPods have a Bluetooth link but no audio profile. Reconnecting..."
+    bluetoothctl disconnect "$AIRPODS_MAC" >/dev/null || true
+    sleep 2
+  fi
+
+  log "Connecting to $AIRPODS_NAME ($AIRPODS_MAC)..."
+
+  if timeout "$TIMEOUT_SECONDS" bluetoothctl connect "$AIRPODS_MAC"; then
+    :
+  else
+    log "Initial connect attempt failed. Retrying once..."
+    sleep 2
+    timeout "$TIMEOUT_SECONDS" bluetoothctl connect "$AIRPODS_MAC" || true
+  fi
+
+  if wait_for_audio; then
+    log "AirPods connected and visible to PulseAudio/PipeWire."
+  elif connected; then
+    log "AirPods have a Bluetooth link, but PipeWire/PulseAudio did not expose an audio device yet."
+    log "They may not appear in pavucontrol until that happens."
+    log "Try closing/reopening the case, disconnecting them from other devices, or running: bluetoothctl power off; sleep 3; bluetoothctl power on"
+    return 1
+  else
+    log "AirPods not connected. Make sure the case is open and they are not connected to another device."
+    return 1
+  fi
+}
+
+start_bluetooth
+connect_airpods
