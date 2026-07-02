@@ -3,8 +3,13 @@
 # wttr.in/Kristianstad source as `weather`. Prints "{}" on any failure so
 # the caller can degrade gracefully.
 
-curl -s --max-time 15 "wttr.in/Kristianstad?format=j1" | python3 -c '
-import json, sys, datetime
+# Query location and the label shown in the UI. wttr.in reports the
+# nearest weather station (e.g. "Hedentorp"), so we display LABEL instead.
+LOCATION="Kristianstad"
+LABEL="Kristianstad"
+
+curl -s --max-time 15 "wttr.in/${LOCATION}?format=j1" | WX_LABEL="$LABEL" python3 -c '
+import json, sys, datetime, os
 
 try:
     d = json.load(sys.stdin)
@@ -29,7 +34,7 @@ try:
         })
 
     out = {
-        "area": na["areaName"][0]["value"],
+        "area": os.environ.get("WX_LABEL") or na["areaName"][0]["value"],
         "tempC": int(cc["temp_C"]),
         "feelsC": int(cc["FeelsLikeC"]),
         "desc": cc["weatherDesc"][0]["value"].strip(),
