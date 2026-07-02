@@ -1,0 +1,46 @@
+#!/bin/sh
+# Compact weather JSON for the quickshell dashboard, from the same
+# wttr.in/Kristianstad source as `weather`. Prints "{}" on any failure so
+# the caller can degrade gracefully.
+
+curl -s --max-time 15 "wttr.in/Kristianstad?format=j1" | python3 -c '
+import json, sys, datetime
+
+try:
+    d = json.load(sys.stdin)
+    cc = d["current_condition"][0]
+    na = d["nearest_area"][0]
+
+    def dayname(s):
+        y, m, dd = (int(x) for x in s.split("-"))
+        return datetime.date(y, m, dd).strftime("%a")
+
+    days = []
+    for day in d["weather"][:4]:
+        hourly = day["hourly"]
+        noon = hourly[4] if len(hourly) > 4 else hourly[0]
+        days.append({
+            "date": day["date"],
+            "name": dayname(day["date"]),
+            "min": int(day["mintempC"]),
+            "max": int(day["maxtempC"]),
+            "code": int(noon["weatherCode"]),
+            "desc": noon["weatherDesc"][0]["value"].strip(),
+        })
+
+    out = {
+        "area": na["areaName"][0]["value"],
+        "tempC": int(cc["temp_C"]),
+        "feelsC": int(cc["FeelsLikeC"]),
+        "desc": cc["weatherDesc"][0]["value"].strip(),
+        "code": int(cc["weatherCode"]),
+        "windKmph": int(cc["windspeedKmph"]),
+        "windDir": cc["winddir16Point"],
+        "humidity": int(cc["humidity"]),
+        "precipMM": float(cc["precipMM"]),
+        "days": days,
+    }
+    print(json.dumps(out))
+except Exception:
+    print("{}")
+'
