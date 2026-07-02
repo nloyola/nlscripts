@@ -1,0 +1,125 @@
+#!/bin/sh
+
+state_file="${XDG_RUNTIME_DIR:-/tmp}/quickshell-net-stats"
+
+iface=$(ip route get 1.1.1.1 2>/dev/null | awk '/ dev / {for (i=1; i<NF; i++) if ($i=="dev") {print $(i+1); exit}}')
+[ -z "$iface" ] && iface=$(ip -o link show up 2>/dev/null | awk -F': ' '$2 != "lo" {print $2; exit}')
+
+# ── CPU usage % (sample /proc/stat over a short interval) ───────────
+cpu_line_1=$(awk '/^cpu / {print}' /proc/stat)
+sleep 0.2
+cpu_line_2=$(awk '/^cpu / {print}' /proc/stat)
+
+cpu_percent=$(awk -v a="$cpu_line_1" -v b="$cpu_line_2" '
+function total(line, arr) { split(line, arr, " "); return arr[2]+arr[3]+arr[4]+arr[5]+arr[6]+arr[7]+arr[8]+arr[9] }
+function idle(line, arr) { split(line, arr, " "); return arr[5]+arr[6] }
+BEGIN {
+  t1=total(a); t2=total(b); i1=idle(a); i2=idle(b);
+  dt=t2-t1; di=i2-i1;
+  if (dt <= 0) print 0; else printf "%d", (100 * (dt - di) / dt)
+}')
+
+# ── CPU package temperature (coretemp "Package id 0") ───────────────
+cpu_temp=""
+for h in /sys/class/hwmon/hwmon*; do
+  [ -r "$h/name" ] || continue
+  [ "$(cat "$h/name" 2>/dev/null)" = "coretemp" ] || continue
+  for lbl in "$h"/temp*_label; do
+    [ -r "$lbl" ] || continue
+    if [ "$(cat "$lbl" 2>/dev/null)" = "Package id 0" ]; then
+      base=${lbl%_label}
+      milli=$(cat "${base}_input" 2>/dev/null)
+      [ -n "$milli" ] && cpu_temp=$(awk -v m="$milli" 'BEGIN { printf "%.1f", m/1000 }')
+      break
+    fi
+  done
+  break
+done
+
+# ── Memory (used/total in MB, percent) ──────────────────────────────
+mem_stats=$(awk '
+/^MemTotal:/ {total=$2}
+/^MemAvailable:/ {avail=$2}
+END {
+  used=total-avail
+  printf "%d %d %d %.1f", used/1024, total/1024, (100*used/total), used/1024/1024
+}' /proc/meminfo)
+mem_used=$(echo "$mem_stats" | awk '{print $1}')
+mem_total=$(echo "$mem_stats" | awk '{print $2}')
+mem_pct=$(echo "$mem_stats" | awk '{print $3}')
+mem_text=$(echo "$mem_stats" | awk '{printf "%sG", $4}')
+
+# ── Load average / process + thread counts ──────────────────────────
+# /proc/loadavg: "0.91 1.62 2.04 17/2120 1971451"
+set -- $(cat /proc/loadavg)
+load1=$1
+load5=$2
+load15=$3
+threads=${4#*/}
+procs=$(ls -d /proc/[0-9]* 2>/dev/null | wc -l)
+
+# ── Uptime (seconds) ────────────────────────────────────────────────
+uptime_s=$(awk '{printf "%d", $1}' /proc/uptime)
+
+# ── Network + disk byte counters ────────────────────────────────────
+now=$(date +%s)
+rx=0
+tx=0
+if [ -n "$iface" ] && [ -r "/sys/class/net/$iface/statistics/rx_bytes" ]; then
+  rx=$(cat "/sys/class/net/$iface/statistics/rx_bytes")
+  tx=$(cat "/sys/class/net/$iface/statistics/tx_bytes")
+fi
+
+# Disk: sum sectors read/written over whole block devices (not partitions)
+disk_sectors=$(awk '$3 ~ /^(sd[a-z]|nvme[0-9]+n[0-9]+|vd[a-z]|mmcblk[0-9]+)$/ {r+=$6; w+=$10} END {printf "%d %d", r, w}' /proc/diskstats)
+dr=$(echo "$disk_sectors" | awk '{print $1}')
+dw=$(echo "$disk_sectors" | awk '{print $2}')
+
+old_now=$now
+old_rx=$rx
+old_tx=$tx
+old_dr=$dr
+old_dw=$dw
+if [ -r "$state_file" ]; then
+  # shellcheck disable=SC1090
+  . "$state_file" 2>/dev/null || true
+fi
+
+elapsed=$((now - old_now))
+[ "$elapsed" -le 0 ] && elapsed=1
+rx_rate=$(( (rx - old_rx) / elapsed ))
+tx_rate=$(( (tx - old_tx) / elapsed ))
+dr_rate=$(( (dr - old_dr) * 512 / elapsed ))
+dw_rate=$(( (dw - old_dw) * 512 / elapsed ))
+[ "$rx_rate" -lt 0 ] && rx_rate=0
+[ "$tx_rate" -lt 0 ] && tx_rate=0
+[ "$dr_rate" -lt 0 ] && dr_rate=0
+[ "$dw_rate" -lt 0 ] && dw_rate=0
+
+cat > "$state_file" <<EOF
+old_now=$now
+old_rx=$rx
+old_tx=$tx
+old_dr=$dr
+old_dw=$dw
+EOF
+
+human_rate() {
+  bytes=$1
+  awk -v b="$bytes" 'BEGIN {
+    if (b >= 1048576) printf "%.1fM", b/1048576;
+    else if (b >= 1024) printf "%dK", b/1024;
+    else printf "%dB", b;
+  }'
+}
+
+rx_text=$(human_rate "$rx_rate")
+tx_text=$(human_rate "$tx_rate")
+
+printf '{"cpu":"%s%%","mem":"%s","net":"↑ %s ↓ %s","cpuPct":%s,"cpuTemp":%s,"memUsed":%s,"memTotal":%s,"memPct":%s,"netRx":%s,"netTx":%s,"diskR":%s,"diskW":%s,"load":[%s,%s,%s],"uptime":%s,"procs":%s,"threads":%s}\n' \
+  "$cpu_percent" "$mem_text" "$tx_text" "$rx_text" \
+  "$cpu_percent" "${cpu_temp:-null}" \
+  "$mem_used" "$mem_total" "$mem_pct" \
+  "$rx_rate" "$tx_rate" "$dr_rate" "$dw_rate" \
+  "$load1" "$load5" "$load15" \
+  "$uptime_s" "$procs" "$threads"
