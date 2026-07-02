@@ -1,0 +1,67 @@
+#!/bin/sh
+
+players=$(playerctl -l 2>/dev/null || true)
+
+pick_player() {
+  # Prefer actively playing players.
+  for p in $players; do
+    [ "$(playerctl -p "$p" status 2>/dev/null)" = "Playing" ] && { echo "$p"; return; }
+  done
+
+  # Prefer ncspot if present, matching your old Polybar config.
+  for p in $players; do
+    case "$p" in
+      ncspot*) echo "$p"; return ;;
+    esac
+  done
+
+  # Then any paused player.
+  for p in $players; do
+    [ "$(playerctl -p "$p" status 2>/dev/null)" = "Paused" ] && { echo "$p"; return; }
+  done
+
+  # Last resort: first player.
+  for p in $players; do
+    echo "$p"
+    return
+  done
+}
+
+player=$(pick_player)
+
+case "$1" in
+  status)
+    if [ -n "$player" ]; then
+      artist=$(playerctl -p "$player" metadata artist 2>/dev/null)
+      title=$(playerctl -p "$player" metadata title 2>/dev/null)
+      status=$(playerctl -p "$player" status 2>/dev/null)
+      icon="󰝚"
+      [ "$status" = "Playing" ] && icon="󰎆"
+      if [ -n "$artist$title" ]; then
+        printf '%s %s\n' "$icon" "${artist:+$artist - }$title" | cut -c1-42
+      else
+        printf '%s %s\n' "$icon" "$status"
+      fi
+    else
+      echo "󰝚 no media"
+    fi
+    ;;
+  play-pause|next|previous|stop)
+    if [ -n "$player" ] && playerctl -p "$player" "$1" 2>/dev/null; then
+      exit 0
+    fi
+
+    # If nothing can be controlled, launch ncspot like your i3 keybind.
+    if [ "$1" = "play-pause" ]; then
+      if [ -x "$HOME/.local/bin/launch_ncspot.sh" ]; then
+        "$HOME/.local/bin/launch_ncspot.sh" >/dev/null 2>&1 &
+      else
+        notify-send "Media" "No controllable media player"
+      fi
+    fi
+    ;;
+  *)
+    echo "usage: qs-media status|play-pause|next|previous" >&2
+    exit 2
+    ;;
+esac
