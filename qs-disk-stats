@@ -1,0 +1,16 @@
+#!/bin/sh
+# Emit mounted filesystem capacity as a JSON array for the quickshell Disk tab.
+# Each entry: {src, fs, size, used, avail, pct, mount} with sizes in bytes.
+# Pseudo/virtual filesystems are excluded so only real disks show up.
+
+df -B1 -x tmpfs -x devtmpfs -x squashfs -x overlay -x efivarfs -x fuse.portal \
+   --output=source,fstype,size,used,avail,pcent,target 2>/dev/null |
+awk '
+  BEGIN { printf "[" }
+  NR > 1 {
+    gsub(/%/, "", $6)
+    printf "%s{\"src\":\"%s\",\"fs\":\"%s\",\"size\":%s,\"used\":%s,\"avail\":%s,\"pct\":%s,\"mount\":\"%s\"}", \
+      (n++ ? "," : ""), $1, $2, $3, $4, $5, $6, $7
+  }
+  END { printf "]\n" }
+'
