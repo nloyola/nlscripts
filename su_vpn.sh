@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Usage: ./vpn.sh {connect|disconnect|restore}
+# Usage: ./su_vpn.sh {connect|disconnect|restore}
 #
 # Works around a FortiClient Linux quirk where `fortivpn connect` fails with
 # "IPsec VPN failed to configure routes and DNS" because it issues
@@ -9,15 +9,15 @@
 # Before connecting we pin a /32 host route to the VPN concentrator via the
 # current gateway, then remove the default. On disconnect (or on a failed
 # connect) we clean up the host route and restore the default. The host route
-# must remain in place for the life of the tunnel — without it, VPN peer
+# must remain in place for the life of the tunnel - without it, VPN peer
 # packets would route through the tunnel and form a loop.
 
 set -euo pipefail
 
 ACTION="${1:-}"
 VPN_PEER="130.237.242.68"
-STATE_FILE="/tmp/vpn.sh.state"
-RESOLV_BACKUP="/tmp/vpn.sh.resolv.conf"
+STATE_FILE="/tmp/su_vpn.sh.state"
+RESOLV_BACKUP="/tmp/su_vpn.sh.resolv.conf"
 
 save_resolv_conf() {
   sudo cp /etc/resolv.conf "$RESOLV_BACKUP" 2>/dev/null || true
@@ -85,7 +85,7 @@ configure_docker_vpn_nat() {
   [[ -n "$vpn_source" ]] || return 0
   printf 'VPN_SOURCE=%q\n' "$vpn_source" >> "$STATE_FILE"
 
-  # Remove any older vpn.sh rules first. Stale rules can reference deleted
+  # Remove any older su_vpn.sh rules first. Stale rules can reference deleted
   # Docker bridges, and rules without the localhost exclusion break published
   # ports reached through http://localhost:PORT/ while the VPN is up.
   remove_docker_vpn_nat
@@ -93,9 +93,9 @@ configure_docker_vpn_nat() {
   while IFS=$'\t' read -r subnet iface; do
     [[ -n "$subnet" && -n "$iface" ]] || continue
     sudo iptables -t nat -C POSTROUTING -s "$subnet" ! -d 127.0.0.0/8 ! -o "$iface" \
-      -m comment --comment vpn.sh-docker-vpn -j SNAT --to-source "$vpn_source" 2>/dev/null \
+      -m comment --comment su_vpn.sh-docker-vpn -j SNAT --to-source "$vpn_source" 2>/dev/null \
       || sudo iptables -t nat -I POSTROUTING 1 -s "$subnet" ! -d 127.0.0.0/8 ! -o "$iface" \
-        -m comment --comment vpn.sh-docker-vpn -j SNAT --to-source "$vpn_source" 2>/dev/null || true
+        -m comment --comment su_vpn.sh-docker-vpn -j SNAT --to-source "$vpn_source" 2>/dev/null || true
   done < <(docker_bridge_routes)
 }
 
@@ -105,7 +105,7 @@ remove_docker_vpn_nat() {
   while read -r rule; do
     [[ -n "$rule" ]] || continue
     sudo timeout 5 bash -c "iptables -w 2 -t nat ${rule/-A POSTROUTING/-D POSTROUTING}" 2>/dev/null || true
-  done < <(sudo iptables -t nat -S POSTROUTING 2>/dev/null | grep -- 'vpn.sh-docker-vpn' || true)
+  done < <(sudo iptables -t nat -S POSTROUTING 2>/dev/null | grep -- 'su_vpn.sh-docker-vpn' || true)
 }
 
 remove_vpn_source_addr() {
@@ -155,7 +155,7 @@ case "$ACTION" in
     remove_stale_vpn_addrs
     save_resolv_conf
     if ! save_default_route; then
-      echo "vpn.sh: no default route found; cannot determine gateway." >&2
+      echo "su_vpn.sh: no default route found; cannot determine gateway." >&2
       exit 1
     fi
     # shellcheck disable=SC1090
@@ -196,9 +196,9 @@ case "$ACTION" in
       # Re-pin Docker routes and SNAT container traffic to the VPN source address.
       pin_docker_routes
       configure_docker_vpn_nat
-      echo "vpn.sh: VPN connected. Run 'vpn.sh disconnect' to tear down and restore routes."
+      echo "su_vpn.sh: VPN connected. Run 'su_vpn.sh disconnect' to tear down and restore routes."
     else
-      echo "vpn.sh: connect failed; restoring routes." >&2
+      echo "su_vpn.sh: connect failed; restoring routes." >&2
       exit "$rc"
     fi
     ;;
