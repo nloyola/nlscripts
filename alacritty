@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+
+HAS_CONFIG=0
+IS_SUBCOMMAND=0
+
+for arg in "$@"; do
+    if [[ "$arg" == *"--config-file"* ]]; then
+        HAS_CONFIG=1
+    fi
+    if [[ "$arg" == "msg" || "$arg" == "migrate" || "$arg" == "help" ]]; then
+        IS_SUBCOMMAND=1
+    fi
+    if [[ "$arg" == "--" ]]; then
+        break
+    fi
+done
+
+THEME_DIR="$HOME/.config/alacritty/themes/themes"
+CACHE_FILE="$HOME/.config/alacritty/readable_dark_themes.cache"
+MIN_CONTRAST_RATIO=4.5
+MAX_DARK_LUMA=120
+
+# Locate the real alacritty binary
+REAL_ALACRITTY="$HOME/.cargo/bin/alacritty"
+if [ ! -x "$REAL_ALACRITTY" ]; then
+    REAL_ALACRITTY=$(PATH=$(echo "$PATH" | sed -e "s|$HOME/.local/bin||g" -e 's|::|:|g') which alacritty)
+fi
+
+if [ "$HAS_CONFIG" -eq 1 ] || [ "$IS_SUBCOMMAND" -eq 1 ]; then
+    exec "$REAL_ALACRITTY" "$@"
+fi
+
+# If cache doesn't exist, or is older than the themes directory or this script, regenerate it.
+if [ ! -f "$CACHE_FILE" ] || [ "$THEME_DIR" -nt "$CACHE_FILE" ] || [ "$0" -nt "$CACHE_FILE" ]; then
+    THEME_DIR="$THEME_DIR" CACHE_FILE="$CACHE_FILE" MIN_CONTRAST_RATIO="$MIN_CONTRAST_RATIO" MAX_DARK_LUMA="$MAX_DARK_LUMA" python3 <<'PY' 2>/dev/null
+import os
+import re
+
+
+def relative_luminance(hex_color):
+    channels = [int(hex_color[i:i + 2], 16) / 255 for i in (0, 2, 4)]
+
+    def normalize(channel):
+        if channel <= 0.03928:
+            return channel / 12.92
+        return ((channel + 0.055) / 1.055) ** 2.4
+
+    red, green, blue = [normalize(channel) for channel in channels]
+    return 0.2126 * red + 0.7152 * green + 0.0722 * blue
+
+
+def contrast_ratio(color_a, color_b):
+    light, dark = sorted(
+        [relative_luminance(color_a), relative_luminance(color_b)],
+        reverse=True,
+    )
+    return (light + 0.05) / (dark + 0.05)
+
+
+def perceived_luma(hex_color):
+    red = int(hex_color[0:2], 16)
+    green = int(hex_color[2:4], 16)
+    blue = int(hex_color[4:6], 16)
+    return 0.299 * red + 0.587 * green + 0.114 * blue
+
+
+theme_dir = os.environ["THEME_DIR"]
+cache_file = os.environ["CACHE_FILE"]
+min_contrast_ratio = float(os.environ["MIN_CONTRAST_RATIO"])
+max_dark_luma = float(os.environ["MAX_DARK_LUMA"])
+color_re = re.compile(r'^\s*(background|foreground)\s*=\s*[\'\"]?#([0-9a-fA-F]{6})[\'\"]?', re.MULTILINE)
+readable_dark_themes = []
+
+for filename in sorted(os.listdir(theme_dir)):
+    if not filename.endswith(".toml"):
+        continue
+
+    try:
+        with open(os.path.join(theme_dir, filename), "r", encoding="utf-8") as theme_file:
+            colors = dict(color_re.findall(theme_file.read()))
+    except OSError:
+        continue
+
+    background = colors.get("background")
+    foreground = colors.get("foreground")
+    if not background or not foreground:
+        continue
+
+    if perceived_luma(background) >= max_dark_luma:
+        continue
+
+    if contrast_ratio(background, foreground) < min_contrast_ratio:
+        continue
+
+    readable_dark_themes.append(filename)
+
+with open(cache_file, "w", encoding="utf-8") as out:
+    out.write("\n".join(readable_dark_themes) + "\n")
+PY
+fi
+
+if [ -s "$CACHE_FILE" ]; then
+    SELECTED_THEME=$(shuf -n 1 "$CACHE_FILE")
+    THEME_PATH="$THEME_DIR/$SELECTED_THEME"
+else
+    THEME_PATH=$(find "$THEME_DIR" -name "*.toml" 2>/dev/null | shuf -n 1)
+fi
+
+if [ -n "$THEME_PATH" ] && [ -f "$THEME_PATH" ]; then
+    # Create unique temp config file to prevent auto-reload conflicts between windows
+    TEMP_CONFIG=$(mktemp /tmp/alacritty-config-XXXXXX.toml)
+    cat <<EOF > "$TEMP_CONFIG"
+[general]
+import = [
+    "$HOME/.config/alacritty/alacritty.toml",
+    "$THEME_PATH"
+]
+EOF
+    exec "$REAL_ALACRITTY" --config-file "$TEMP_CONFIG" "$@"
+else
+    exec "$REAL_ALACRITTY" "$@"
+fi
