@@ -45,12 +45,35 @@ wait_vpn_stopped() {
 
 save_default_route() {
   local line gw dev
-  line="$(ip -4 route show default | head -n1)"
-  [[ -n "$line" ]] || return 1
-  gw="$(awk '{for(i=1;i<=NF;i++) if($i=="via"){print $(i+1); exit}}' <<<"$line")"
-  dev="$(awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}' <<<"$line")"
-  [[ -n "$gw" && -n "$dev" ]] || return 1
-  printf 'GATEWAY=%s\nDEVICE=%s\n' "$gw" "$dev" > "$STATE_FILE"
+  # Pick the first default route that has a real "via" gateway. While the
+  # tunnel is up FortiClient leaves a gatewayless
+  # "default dev <if> proto static scope link" route behind; a naive head -n1
+  # would grab that on a reconnect, find no gateway, and abort. Skip any
+  # default route without a "via" and use the real gateway'd one.
+  while IFS= read -r line; do
+    [[ "$line" == *" via "* ]] || continue
+    gw="$(awk '{for(i=1;i<=NF;i++) if($i=="via"){print $(i+1); exit}}' <<<"$line")"
+    dev="$(awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}' <<<"$line")"
+    [[ -n "$gw" && -n "$dev" ]] || continue
+    printf 'GATEWAY=%s\nDEVICE=%s\n' "$gw" "$dev" > "$STATE_FILE"
+    return 0
+  done < <(ip -4 route show default)
+  return 1
+}
+
+warn_if_tailscale_exit_node() {
+  command -v tailscale >/dev/null 2>&1 || return 0
+  # Only a Tailscale *exit node* (full-tunnel) conflicts with the SU full
+  # tunnel; a normal Tailscale session routes just 100.64/10 in its own table
+  # and coexists fine, so we don't touch it. Detect the exit-node case via the
+  # 0.0.0.0/1 split-default route Tailscale installs in its routing table
+  # (table 52) when an exit node is active, and only warn - never disable it,
+  # since Tailscale may be the user's remote-access path.
+  if ip route show table 52 2>/dev/null | grep -q '^0\.0\.0\.0/1 '; then
+    echo "su_vpn.sh: warning: a Tailscale exit node looks active (full-tunnel)." >&2
+    echo "su_vpn.sh: it may capture traffic and conflict with the SU VPN." >&2
+    echo "su_vpn.sh: run 'tailscale set --exit-node=' first if the VPN misbehaves." >&2
+  fi
 }
 
 docker_bridge_routes() {
@@ -152,6 +175,7 @@ restore_routes() {
 
 case "$ACTION" in
   connect)
+    warn_if_tailscale_exit_node
     remove_stale_vpn_addrs
     save_resolv_conf
     if ! save_default_route; then

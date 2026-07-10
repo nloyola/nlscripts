@@ -48,12 +48,20 @@ wait_vpn_stopped() {
 
 save_default_route() {
   local line gw dev
-  line="$(ip -4 route show default | head -n1)"
-  [[ -n "$line" ]] || return 1
-  gw="$(awk '{for(i=1;i<=NF;i++) if($i=="via"){print $(i+1); exit}}' <<<"$line")"
-  dev="$(awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}' <<<"$line")"
-  [[ -n "$gw" && -n "$dev" ]] || return 1
-  printf 'GATEWAY=%s\nDEVICE=%s\n' "$gw" "$dev" > "$STATE_FILE"
+  # Pick the first default route that has a real "via" gateway. While a
+  # FortiClient tunnel is up it can leave a gatewayless
+  # "default dev <if> proto static scope link" route behind; a naive head -n1
+  # would grab that on a reconnect, find no gateway, and abort. Skip any
+  # default route without a "via" and use the real gateway'd one.
+  while IFS= read -r line; do
+    [[ "$line" == *" via "* ]] || continue
+    gw="$(awk '{for(i=1;i<=NF;i++) if($i=="via"){print $(i+1); exit}}' <<<"$line")"
+    dev="$(awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}' <<<"$line")"
+    [[ -n "$gw" && -n "$dev" ]] || continue
+    printf 'GATEWAY=%s\nDEVICE=%s\n' "$gw" "$dev" > "$STATE_FILE"
+    return 0
+  done < <(ip -4 route show default)
+  return 1
 }
 
 resolve_vpn_peer_route() {
