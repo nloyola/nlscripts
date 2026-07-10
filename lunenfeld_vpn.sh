@@ -64,6 +64,22 @@ save_default_route() {
   return 1
 }
 
+warn_if_tailscale_exit_node() {
+  command -v tailscale >/dev/null 2>&1 || return 0
+  # A Tailscale *exit node* (full-tunnel) routes all traffic through Tailscale
+  # and can capture packets before this VPN's routes are consulted; a normal
+  # Tailscale session routes just 100.64/10 in its own table and coexists fine,
+  # so we don't touch it. Detect the exit-node case via the 0.0.0.0/1
+  # split-default route Tailscale installs in its routing table (table 52) when
+  # an exit node is active, and only warn - never disable it, since Tailscale
+  # may be the user's remote-access path.
+  if ip route show table 52 2>/dev/null | grep -q '^0\.0\.0\.0/1 '; then
+    echo "lunenfeld_vpn.sh: warning: a Tailscale exit node looks active (full-tunnel)." >&2
+    echo "lunenfeld_vpn.sh: it may capture traffic and conflict with the VPN." >&2
+    echo "lunenfeld_vpn.sh: run 'tailscale set --exit-node=' first if the VPN misbehaves." >&2
+  fi
+}
+
 resolve_vpn_peer_route() {
   local peer_ip
   peer_ip="$(getent ahostsv4 "$VPN_PEER" | awk 'NR == 1 {print $1}')"
@@ -220,6 +236,7 @@ restore_routes() {
 
 case "$ACTION" in
   connect)
+    warn_if_tailscale_exit_node
     remove_stale_vpn_addrs
     save_resolv_conf
     if ! save_default_route; then
