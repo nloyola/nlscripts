@@ -25,7 +25,13 @@ save_resolv_conf() {
 }
 
 restore_resolv_conf() {
-  if [[ -s "$RESOLV_BACKUP" ]]; then
+  # On systemd-resolved hosts /etc/resolv.conf is a symlink to resolved's stub;
+  # restore that symlink rather than copying a flat file over it, which would
+  # strip resolved's split-DNS / MagicDNS integration. Fall back to the flat-file
+  # restore on hosts without resolved.
+  if [[ -e /run/systemd/resolve/stub-resolv.conf ]]; then
+    sudo ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf 2>/dev/null || true
+  elif [[ -s "$RESOLV_BACKUP" ]]; then
     sudo cp "$RESOLV_BACKUP" /etc/resolv.conf 2>/dev/null || true
   elif [[ -s /run/NetworkManager/resolv.conf ]]; then
     sudo cp /run/NetworkManager/resolv.conf /etc/resolv.conf 2>/dev/null || true
@@ -73,6 +79,34 @@ warn_if_tailscale_exit_node() {
     echo "su_vpn.sh: warning: a Tailscale exit node looks active (full-tunnel)." >&2
     echo "su_vpn.sh: it may capture traffic and conflict with the SU VPN." >&2
     echo "su_vpn.sh: run 'tailscale set --exit-node=' first if the VPN misbehaves." >&2
+  fi
+}
+
+reassert_tailscale() {
+  # Our default-route churn during connect (delete default, reconnect) can race
+  # tailscaled and leave tailscale0 down with no tailnet routes and MagicDNS
+  # stripped from /etc/resolv.conf by our flat-file resolv restore. Called from
+  # restore_routes so every teardown leaves Tailscale intact. Respects the
+  # user's prefs: only acts when Tailscale is meant to be running.
+  command -v tailscale >/dev/null 2>&1 || return 0
+  local state
+  state="$(tailscale status --json 2>/dev/null | awk -F'"' '/"BackendState"/ {print $4; exit}')"
+  [[ "$state" == "Running" ]] || return 0
+
+  local op
+  op="$(cat /sys/class/net/tailscale0/operstate 2>/dev/null || echo down)"
+  if [[ "$op" == "down" ]]; then
+    # A plain `tailscale up` will not recreate a downed TUN link; only a daemon
+    # restart reliably brings tailscale0 back and reinstalls routes + DNS.
+    sudo systemctl restart tailscaled 2>/dev/null || true
+  elif [[ ! -L /etc/resolv.conf ]] \
+       && tailscale dns status 2>/dev/null | grep -q "Tailscale DNS: enabled" \
+       && ! grep -q '^nameserver 100\.100\.100\.100' /etc/resolv.conf 2>/dev/null; then
+    # Flat-file resolv.conf host (no systemd-resolved): MagicDNS is enabled but
+    # our resolv restore dropped it. Re-assert (idempotent: already enabled, so
+    # no pref changes). On resolved hosts resolv.conf is a symlink and MagicDNS
+    # lives in resolved's per-link config, so this branch is skipped.
+    sudo tailscale set --accept-dns=true 2>/dev/null || true
   fi
 }
 
@@ -157,6 +191,7 @@ restore_routes() {
   if [[ ! -f "$STATE_FILE" ]]; then
     remove_stale_vpn_addrs
     restore_resolv_conf
+    reassert_tailscale
     return 0
   fi
   local GATEWAY="" DEVICE="" VPN_SOURCE=""
@@ -170,6 +205,7 @@ restore_routes() {
     sudo ip route replace default via "$GATEWAY" dev "$DEVICE"
   fi
   restore_resolv_conf
+  reassert_tailscale
   rm -f "$STATE_FILE"
 }
 
