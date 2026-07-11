@@ -11,6 +11,18 @@
 # connect) we clean up the host route and restore the default. The host route
 # must remain in place for the life of the tunnel - without it, VPN peer
 # packets would route through the tunnel and form a loop.
+#
+# This is a SPLIT tunnel: after connecting we put the local default route back
+# so general traffic stays local, and only the LUNENFELD_ROUTES/HOSTS below go
+# over the tunnel. Two pitfalls this script guards against:
+#   1. The default-route restore must happen BEFORE any best-effort host pinning
+#      in the success branch. The pinning resolves internal hosts through the
+#      VPN's DNS, which can time out; if that ran first and aborted the script,
+#      the machine would be left with no default route (i.e. offline).
+#   2. `dig` against an unresponsive internal DNS exits non-zero (e.g. 9) and,
+#      under `set -euo pipefail`, would abort the whole script. All internal
+#      resolution is therefore time-bounded and swallowed (see
+#      resolve_with_server / resolve_vpn_peer_route).
 
 set -euo pipefail
 
@@ -28,12 +40,13 @@ save_resolv_conf() {
 }
 
 restore_resolv_conf() {
+  local keep_backup="${1:-}"
   if [[ -s "$RESOLV_BACKUP" ]]; then
     sudo cp "$RESOLV_BACKUP" /etc/resolv.conf 2>/dev/null || true
   elif [[ -s /run/NetworkManager/resolv.conf ]]; then
     sudo cp /run/NetworkManager/resolv.conf /etc/resolv.conf 2>/dev/null || true
   fi
-  rm -f "$RESOLV_BACKUP"
+  [[ "$keep_backup" == "keep-backup" ]] || rm -f "$RESOLV_BACKUP"
 }
 
 wait_vpn_stopped() {
@@ -81,9 +94,15 @@ warn_if_tailscale_exit_node() {
 }
 
 resolve_vpn_peer_route() {
-  local peer_ip
+  local peer_ip server
   peer_ip="$(getent ahostsv4 "$VPN_PEER" | awk 'NR == 1 {print $1}')"
-  [[ -n "$peer_ip" ]] || return 1
+  if [[ -z "$peer_ip" ]] && command -v dig >/dev/null 2>&1; then
+    for server in 1.1.1.1 8.8.8.8; do
+      peer_ip="$(dig +short +time=2 +tries=1 A "$VPN_PEER" "@$server" 2>/dev/null | awk 'NR == 1 {print $1; exit}' || true)"
+      [[ -n "$peer_ip" ]] && break
+    done
+  fi
+  [[ "$peer_ip" =~ ^[0-9]+(\.[0-9]+){3}$ ]] || return 1
   VPN_PEER_ROUTE="$peer_ip/32"
   printf 'VPN_PEER_ROUTE=%q\n' "$VPN_PEER_ROUTE" >> "$STATE_FILE"
 }
@@ -132,7 +151,13 @@ vpn_dns_servers() {
 
 resolve_with_server() {
   local host="$1" server="$2"
-  dig +short A "$host" "@$server" 2>/dev/null | awk 'NR == 1 {print $1; exit}'
+  # Bound the query and never propagate failure. dig exits non-zero (e.g. 9,
+  # "no servers could be reached") when the VPN's internal DNS does not answer;
+  # under `set -euo pipefail` that would abort the whole script mid-connect. On
+  # failure this dig also prints ";; ..." diagnostics to stdout, so only accept
+  # a line that is a bare IPv4 address.
+  dig +short +time=2 +tries=1 A "$host" "@$server" 2>/dev/null \
+    | awk '/^[0-9]+(\.[0-9]+){3}$/ {print; exit}' || true
 }
 
 pin_lunenfeld_routes() {
@@ -141,9 +166,10 @@ pin_lunenfeld_routes() {
   [[ -n "$vpn_source" ]] || return 0
   vpn_device="$(ip -o -4 addr show | awk -v ip="$vpn_source" '$4 == ip "/32" {print $2; exit}')"
   [[ -n "$vpn_device" ]] || return 0
+  printf 'VPN_SOURCE=%q\n' "$vpn_source" >> "$STATE_FILE"
 
   for route in "${LUNENFELD_ROUTES[@]}"; do
-    sudo ip route replace "$route" via "$vpn_source" dev "$vpn_device" 2>/dev/null || true
+    sudo ip route replace "$route" dev "$vpn_device" src "$vpn_source" 2>/dev/null || true
     printf 'LUNENFELD_ROUTE=%q\n' "$route" >> "$STATE_FILE"
   done
 
@@ -152,7 +178,7 @@ pin_lunenfeld_routes() {
     for host in "${LUNENFELD_HOSTS[@]}"; do
       ip="$(resolve_with_server "$host" "$server")"
       [[ -n "$ip" ]] || continue
-      sudo ip route replace "$ip/32" via "$vpn_source" dev "$vpn_device" 2>/dev/null || true
+      sudo ip route replace "$ip/32" dev "$vpn_device" src "$vpn_source" 2>/dev/null || true
       printf 'LUNENFELD_ROUTE=%q\n' "$ip/32" >> "$STATE_FILE"
     done
   done < <(vpn_dns_servers)
@@ -257,6 +283,7 @@ case "$ACTION" in
 
     pin_docker_routes
     sudo ip route replace "$VPN_PEER_ROUTE" via "$GATEWAY" dev "$DEVICE"
+    sudo ip route del default 2>/dev/null || true
 
     rc=0
     expect -c '
@@ -286,9 +313,16 @@ case "$ACTION" in
 
     if [[ $rc -eq 0 ]]; then
       trap - EXIT
-      pin_lunenfeld_routes
+      # Restore the local default route *first* so the machine has working
+      # internet even if the best-effort host pinning below fails. The connect
+      # step above deleted the default route; previously its restore came after
+      # pin_lunenfeld_routes, so a DNS timeout there aborted the script and left
+      # the machine with no default route.
       sudo ip route replace default via "$GATEWAY" dev "$DEVICE"
-      restore_resolv_conf
+      # Best effort: pin extra host routes over the tunnel. Must never abort the
+      # script (and strand the machine offline) if the VPN's DNS is slow.
+      pin_lunenfeld_routes || true
+      restore_resolv_conf keep-backup
       # Re-pin Docker routes after restoring the normal default route.
       pin_docker_routes
       echo "lunenfeld_vpn.sh: VPN connected. Run 'lunenfeld_vpn.sh disconnect' to tear down and restore routes."
