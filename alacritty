@@ -19,6 +19,8 @@ THEME_DIR="$HOME/.config/alacritty/themes/themes"
 CACHE_FILE="$HOME/.config/alacritty/readable_dark_themes.cache"
 MIN_CONTRAST_RATIO=4.5
 MAX_DARK_LUMA=120
+# Themes to exclude from the random rotation (space-separated .toml filenames).
+EXCLUDED_THEMES="falcon.toml"
 
 # Locate the real alacritty binary
 REAL_ALACRITTY="$HOME/.cargo/bin/alacritty"
@@ -32,7 +34,7 @@ fi
 
 # If cache doesn't exist, or is older than the themes directory or this script, regenerate it.
 if [ ! -f "$CACHE_FILE" ] || [ "$THEME_DIR" -nt "$CACHE_FILE" ] || [ "$0" -nt "$CACHE_FILE" ]; then
-    THEME_DIR="$THEME_DIR" CACHE_FILE="$CACHE_FILE" MIN_CONTRAST_RATIO="$MIN_CONTRAST_RATIO" MAX_DARK_LUMA="$MAX_DARK_LUMA" python3 <<'PY' 2>/dev/null
+    THEME_DIR="$THEME_DIR" CACHE_FILE="$CACHE_FILE" MIN_CONTRAST_RATIO="$MIN_CONTRAST_RATIO" MAX_DARK_LUMA="$MAX_DARK_LUMA" EXCLUDED_THEMES="$EXCLUDED_THEMES" python3 <<'PY' 2>/dev/null
 import os
 import re
 
@@ -68,11 +70,15 @@ theme_dir = os.environ["THEME_DIR"]
 cache_file = os.environ["CACHE_FILE"]
 min_contrast_ratio = float(os.environ["MIN_CONTRAST_RATIO"])
 max_dark_luma = float(os.environ["MAX_DARK_LUMA"])
+excluded_themes = set(os.environ.get("EXCLUDED_THEMES", "").split())
 color_re = re.compile(r'^\s*(background|foreground)\s*=\s*[\'\"]?#([0-9a-fA-F]{6})[\'\"]?', re.MULTILINE)
 readable_dark_themes = []
 
 for filename in sorted(os.listdir(theme_dir)):
     if not filename.endswith(".toml"):
+        continue
+
+    if filename in excluded_themes:
         continue
 
     try:
@@ -103,7 +109,13 @@ if [ -s "$CACHE_FILE" ]; then
     SELECTED_THEME=$(shuf -n 1 "$CACHE_FILE")
     THEME_PATH="$THEME_DIR/$SELECTED_THEME"
 else
-    THEME_PATH=$(find "$THEME_DIR" -name "*.toml" 2>/dev/null | shuf -n 1)
+    EXCLUDE_ARGS=()
+    for t in $EXCLUDED_THEMES; do EXCLUDE_ARGS+=(-e "/$t"); done
+    if [ ${#EXCLUDE_ARGS[@]} -gt 0 ]; then
+        THEME_PATH=$(find "$THEME_DIR" -name "*.toml" 2>/dev/null | grep -vF "${EXCLUDE_ARGS[@]}" | shuf -n 1)
+    else
+        THEME_PATH=$(find "$THEME_DIR" -name "*.toml" 2>/dev/null | shuf -n 1)
+    fi
 fi
 
 if [ -n "$THEME_PATH" ] && [ -f "$THEME_PATH" ]; then
