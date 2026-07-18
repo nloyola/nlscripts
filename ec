@@ -1,46 +1,26 @@
 #!/usr/bin/env bash
+#
+# ec - open files in the running Emacs (via emacsclient), reusing the
+# existing frame. Falls back to starting a standalone Emacs if no server
+# is reachable.
 
-usage() { echo "Usage: $0 [-s SOCKET_NAME] FILE1 .. FILEn" 1>&2; exit 1; }
+set -euo pipefail
 
-OPTS="-n -c"
-SOCKET=""
+usage() { echo "Usage: ${0##*/} [-s SOCKET_NAME] FILE1 .. FILEn" 1>&2; exit 1; }
 
-while getopts ":s" o; do
-    case "${o}" in
-        s)
-            SOCKET="${OPTARGS}"
-            ;;
-        *)
-            usage
-            ;;
+socket=""
+while getopts ":s:" o; do
+    case "$o" in
+        s) socket="$OPTARG" ;;
+        *) usage ;;
     esac
 done
+shift $((OPTIND - 1))
 
-if [ ! -z "$SOCKET"]; then
-   OPTS="$OPTS --socket-name=$SOCKET -c"
-fi
+emacsclient=$(command -v emacsclient) || { echo "emacsclient not found in PATH" 1>&2; exit 1; }
+emacs=$(command -v emacs)             || { echo "emacs not found in PATH" 1>&2; exit 1; }
 
-if [ -f $HOME/installs/bin/emacs ]; then
-    EMACS_PATH=$HOME/installs/bin
-fi
+opts=(--no-wait --alternate-editor="$emacs")
+[ -n "$socket" ] && opts+=(--socket-name="$socket")
 
-if [ -f $HOME/bin/bin/emacs ]; then
-    EMACS_PATH=$HOME/bin/bin
-fi
-
-if [ -f /usr/bin/emacs ]; then
-    EMACS_PATH=/usr/bin
-fi
-
-if [ -f /usr/local/bin/emacs ]; then
-    EMACS_PATH=/usr/local/bin
-fi
-
-if [ "$EMACS_PATH" == "" ]; then
-    echo "No path to Emacs"
-    exit
-fi
-
-OPTS="$OPTS -a $EMACS_PATH/emacs"
-
-$EMACS_PATH/emacsclient $OPTS $* &
+exec "$emacsclient" "${opts[@]}" "$@"
