@@ -20,7 +20,7 @@ CACHE_FILE="$HOME/.config/alacritty/readable_dark_themes.cache"
 MIN_CONTRAST_RATIO=4.5
 MAX_DARK_LUMA=120
 # Themes to exclude from the random rotation (space-separated .toml filenames).
-EXCLUDED_THEMES="falcon.toml"
+EXCLUDED_THEMES="falcon.toml high_contrast.toml"
 
 # Locate the real alacritty binary
 REAL_ALACRITTY="$HOME/.cargo/bin/alacritty"
