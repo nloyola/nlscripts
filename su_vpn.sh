@@ -16,8 +16,41 @@ set -euo pipefail
 
 ACTION="${1:-}"
 VPN_PEER="130.237.242.68"
+VPN_PASS_ENTRY="su.se/nelo6128"
 STATE_FILE="/tmp/su_vpn.sh.state"
 RESOLV_BACKUP="/tmp/su_vpn.sh.resolv.conf"
+
+check_pass_entry() {
+  # `pass <name>` on a *directory* prints a tree listing and still exits 0, so
+  # renaming an entry breaks us silently: expect types the listing into the
+  # password prompt, the FortiClient EAP exchange stalls with no reply and no
+  # failure, and connect hangs until the expect timeout. Validate the shape up
+  # front so a rename fails loudly and early instead. Only a verdict crosses
+  # the pipe - the secret itself never lands in a variable.
+  local verdict
+  verdict="$(pass "$VPN_PASS_ENTRY" 2>/dev/null \
+    | awk 'NR==1                  { blank = ($0 ~ /^[[:space:]]*$/) }
+           /[|+`\\]--|[└├│]/      { tree = 1 }
+           END   { if (NR == 0)   print "empty"
+                   else if (tree) print "tree"
+                   else if (blank) print "blank"
+                   else print "ok" }')" || true
+
+  case "$verdict" in
+    ok) return 0 ;;
+    tree)
+      echo "su_vpn.sh: pass entry '$VPN_PASS_ENTRY' returned a directory listing, not a" >&2
+      echo "su_vpn.sh: password. It was probably renamed - check 'pass ls su.se'." >&2
+      ;;
+    blank)
+      echo "su_vpn.sh: pass entry '$VPN_PASS_ENTRY' has an empty first line." >&2
+      ;;
+    *)
+      echo "su_vpn.sh: pass entry '$VPN_PASS_ENTRY' is missing or would not decrypt." >&2
+      ;;
+  esac
+  return 1
+}
 
 save_resolv_conf() {
   sudo cp /etc/resolv.conf "$RESOLV_BACKUP" 2>/dev/null || true
@@ -211,6 +244,9 @@ restore_routes() {
 
 case "$ACTION" in
   connect)
+    # Check credentials before touching any routes: a bad pass entry must fail
+    # while the network is still intact, not after we have deleted the default.
+    check_pass_entry || exit 1
     warn_if_tailscale_exit_node
     remove_stale_vpn_addrs
     save_resolv_conf
@@ -230,14 +266,16 @@ case "$ACTION" in
     sudo ip route del default 2>/dev/null || true
 
     rc=0
-    expect -c '
+    # The entry *name* (not the secret) is passed through the environment so the
+    # expect script below can stay single-quoted and share the constant above.
+    VPN_PASS_ENTRY="$VPN_PASS_ENTRY" expect -c '
       set timeout 60
       log_user 1
       spawn /opt/forticlient/fortivpn connect SU-Linux-vpn -u nelo6128
       set connected 0
       expect {
         -re "(?i)Password:" {
-          send -- "[exec pass su.se]\r"
+          send -- "[exec pass $env(VPN_PASS_ENTRY) | head -n 1]\r"
           exp_continue
         }
         "Status: Connected" {
