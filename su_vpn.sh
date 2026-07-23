@@ -311,8 +311,20 @@ case "$ACTION" in
     restore_routes
     echo "Routes restored."
     ;;
+  refresh-docker)
+    # Re-apply the Docker<->VPN routes and NAT for the *current* set of bridges.
+    # Safe to call anytime: a no-op unless the VPN is up (STATE_FILE present).
+    # Docker rebuilds its iptables and can create new bridges on every
+    # `compose up`, which leaves connect-time rules stale/mis-ordered; the
+    # su-vpn-docker-nat.service watcher calls this on Docker network events so
+    # containers (re)started AFTER `connect` still route out the tunnel instead
+    # of black-holing with "Host is unreachable".
+    [[ -f "$STATE_FILE" ]] || exit 0
+    pin_docker_routes
+    configure_docker_vpn_nat
+    ;;
   *)
-    echo "Usage: $0 {connect|disconnect|restore}" >&2
+    echo "Usage: $0 {connect|disconnect|restore|refresh-docker}" >&2
     exit 1
     ;;
 esac
