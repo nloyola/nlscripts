@@ -57,6 +57,29 @@ save_resolv_conf() {
   sudo chown "$(id -u):$(id -g)" "$RESOLV_BACKUP" 2>/dev/null || true
 }
 
+clear_resolved_global_dns() {
+  # FortiClient pins SU's resolver as systemd-resolved's *global* (manager,
+  # ifindex 0) DNS at connect and never reverts it on disconnect, leaving it
+  # stranded where it can shadow the per-link DNS NetworkManager configures - so
+  # e.g. a LAN Pi-hole silently stops being used. `resolvectl revert` only
+  # touches per-link config and there is no CLI to clear a runtime global
+  # server, but a reload makes resolved re-read resolved.conf and drop the
+  # in-memory global while keeping every per-link (NM/tailscale) config and the
+  # DNS cache intact. Guarded to a no-op unless resolved is running, resolved.conf
+  # configures no global DNS of its own (so any global server present is runtime
+  # cruft, not intended config), and a global server is in fact set.
+  systemctl is-active --quiet systemd-resolved 2>/dev/null || return 0
+  grep -qsE '^[[:space:]]*DNS[[:space:]]*=[[:space:]]*[^[:space:]]' \
+      /etc/systemd/resolved.conf /etc/systemd/resolved.conf.d/*.conf 2>/dev/null && return 0
+  resolvectl status 2>/dev/null | awk '
+    /^Global$/          { g = 1; next }
+    /^Link /            { g = 0 }
+    g && /DNS Servers:/ { sub(/.*DNS Servers:[[:space:]]*/, ""); if (length($0)) found = 1 }
+    END                 { exit(found ? 0 : 1) }
+  ' || return 0
+  sudo systemctl reload systemd-resolved 2>/dev/null || true
+}
+
 restore_resolv_conf() {
   # On systemd-resolved hosts /etc/resolv.conf is a symlink to resolved's stub;
   # restore that symlink rather than copying a flat file over it, which would
@@ -69,6 +92,9 @@ restore_resolv_conf() {
   elif [[ -s /run/NetworkManager/resolv.conf ]]; then
     sudo cp /run/NetworkManager/resolv.conf /etc/resolv.conf 2>/dev/null || true
   fi
+  # The symlink restore above only fixes the stub file; resolved's stranded
+  # global DNS lives in its runtime state and must be cleared separately.
+  clear_resolved_global_dns
   rm -f "$RESOLV_BACKUP"
 }
 
