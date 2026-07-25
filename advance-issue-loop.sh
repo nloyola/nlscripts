@@ -2,7 +2,10 @@
 # Run one fresh `claude -p` session per unchecked step of a GitHub issue, driving
 # the advance-issue-step skill, until no unchecked steps remain.
 #
-#   advance-issue-loop.sh <issue-number> [max-sessions] [branch]
+#   advance-issue-loop.sh <issue-number> [max-sessions] [branch] [effort]
+#
+# Every session runs at the same reasoning effort, defaulting to medium. Pass
+# one of low, medium, high, xhigh, or max to raise or lower it for a whole run.
 #
 # Stops early if a session produces no commit or fails to tick its checkbox,
 # so a confused session cannot cascade into the following steps.
@@ -37,9 +40,17 @@
 
 set -uo pipefail
 
-issue="${1:?usage: advance-issue-loop.sh <issue-number> [max-sessions] [branch]}"
+issue="${1:?usage: advance-issue-loop.sh <issue-number> [max-sessions] [branch] [effort]}"
 max="${2:-20}"
 branch_arg="${3:-}"
+effort="${4:-medium}"
+
+# Checked here rather than left to claude: an invalid level should cost nothing,
+# not fail once per session after the branch has already been created.
+case "$effort" in
+  low|medium|high|xhigh|max) ;;
+  *) echo "!! invalid effort '$effort'; expected low, medium, high, xhigh, or max" >&2; exit 1 ;;
+esac
 
 repo_root=$(git rev-parse --show-toplevel)
 env_file="$repo_root/.env"
@@ -211,9 +222,9 @@ for ((i = 1; i <= max; i++)); do
     die "Next step of #$issue is gated: $gates. $before_open step(s) still open."
 
   before_head=$(git rev-parse HEAD)
-  echo "==> session $i starting: $before_open step(s) remaining"
+  echo "==> session $i starting at $effort effort: $before_open step(s) remaining"
 
-  claude -p --permission-mode acceptEdits \
+  claude -p --permission-mode acceptEdits --effort "$effort" \
     "Use the advance-issue-step skill to implement the next unchecked step of GitHub issue #$issue. Stay on the current branch ($branch); do not create, switch, or merge branches, and do not open a pull request." ||
     die "Session $i exited non-zero. $before_open step(s) still open."
 
