@@ -83,6 +83,51 @@ unchecked() {
   gh issue view "$issue" --json body -q .body | grep -c '^- \[ \]' || true
 }
 
+# Gates are written into the heading of the step they gate, per the
+# writing-issues contract:
+#
+#   - [ ] **Step 7 - Cutover** (gated on Step 4)
+#   - [ ] **Step 7 - Cutover** (gated on #12)
+#
+# advance-issue-step resolves these before it implements; the loop resolves them
+# again before spending a session, because the two checks cover different holes.
+# The blockedBy check above is issue-level and runs only when an issue is
+# started, so a resumed run would reach a gated step with nothing having looked
+# at it. Checking here also stops a blocked run without burning a session to
+# discover it.
+#
+# Prints the unmet gates and returns 1; returns 0 when the next step is clear or
+# carries no gate at all.
+unmet_gates() {
+  local body step gates n ref unmet=""
+
+  body=$(gh issue view "$issue" --json body -q .body)
+  step=$(printf '%s\n' "$body" | grep -m1 '^- \[ \]')
+  [ -n "$step" ] || return 0
+
+  gates=$(printf '%s\n' "$step" | grep -oiE '\(gated on [^)]*\)')
+  [ -n "$gates" ] || return 0
+
+  # A gate on another step of this issue is met once that step is ticked. The
+  # trailing [^0-9] keeps "Step 1" from matching "Step 10".
+  while read -r n; do
+    [ -n "$n" ] || continue
+    printf '%s\n' "$body" | grep -qiE "^- \[[xX]\] \*\*Step ${n}[^0-9]" ||
+      unmet="${unmet:+$unmet; }Step $n is not ticked"
+  done < <(printf '%s\n' "$gates" | grep -oiE 'step +[0-9]+' | grep -oE '[0-9]+')
+
+  # A gate on another issue is met only once that issue is closed.
+  while read -r ref; do
+    [ -n "$ref" ] || continue
+    [ "$(gh issue view "$ref" --json state -q .state 2>/dev/null)" = "CLOSED" ] ||
+      unmet="${unmet:+$unmet; }#$ref is not closed"
+  done < <(printf '%s\n' "$gates" | grep -oE '#[0-9]+' | tr -d '#')
+
+  [ -n "$unmet" ] || return 0
+  printf '%s' "$unmet"
+  return 1
+}
+
 repo=$(basename "$repo_root")
 
 # Derive a branch name from the issue title. Drops a leading "Phase 1.2 - " so
@@ -161,6 +206,9 @@ for ((i = 1; i <= max; i++)); do
       "Every step done on $branch. Ready to review and integrate."
     exit 0
   fi
+
+  gates=$(unmet_gates) ||
+    die "Next step of #$issue is gated: $gates. $before_open step(s) still open."
 
   before_head=$(git rev-parse HEAD)
   echo "==> session $i starting: $before_open step(s) remaining"
