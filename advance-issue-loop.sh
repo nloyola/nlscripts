@@ -2,10 +2,20 @@
 # Run one fresh `claude -p` session per unchecked step of a GitHub issue, driving
 # the advance-issue-step skill, until no unchecked steps remain.
 #
-#   advance-issue-loop.sh <issue-number> [max-sessions]
+#   advance-issue-loop.sh <issue-number> [max-sessions] [branch]
 #
 # Stops early if a session produces no commit or fails to tick its checkbox,
 # so a confused session cannot cascade into the following steps.
+#
+# Every issue gets its own branch. Starting an issue creates one, named from the
+# issue title unless a name is given; resuming an issue whose branch already
+# exists switches to it rather than starting over.
+#
+# Starting an issue requires a clean tree, the default branch checked out, and
+# every blocking issue closed. Refusing to stack a new issue on unmerged work is
+# the point: dependencies are satisfied by merging them, not by branching off
+# them, so the base a step is written against is the base it will be merged to.
+# Resuming an existing issue branch skips these checks.
 #
 # Push notifications go to ntfy on two occasions only: every step done, and any
 # early stop. Per-step progress goes to stdout, not to your phone. Every abnormal
@@ -27,8 +37,9 @@
 
 set -uo pipefail
 
-issue="${1:?usage: advance-issue-loop.sh <issue-number> [max-sessions]}"
+issue="${1:?usage: advance-issue-loop.sh <issue-number> [max-sessions] [branch]}"
 max="${2:-20}"
+branch_arg="${3:-}"
 
 repo_root=$(git rev-parse --show-toplevel)
 env_file="$repo_root/.env"
@@ -73,15 +84,76 @@ unchecked() {
 }
 
 repo=$(basename "$repo_root")
-branch=$(git rev-parse --abbrev-ref HEAD)
-echo "==> issue #$issue on branch $branch"
+
+# Derive a branch name from the issue title. Drops a leading "Phase 1.2 - " so
+# the name describes the work rather than its place in a plan.
+derive_branch() {
+  local slug
+  slug=$(gh issue view "$issue" --json title -q .title |
+    sed -E 's/^[[:space:]]*[Pp]hase[[:space:]]+[0-9]+(\.[0-9]+)*[[:space:]]*[-:][[:space:]]*//' |
+    tr '[:upper:]' '[:lower:]' |
+    sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//' |
+    cut -c1-40 | sed -E 's/-+$//')
+  [ -n "$slug" ] || slug=work
+  printf 'feat/issue-%s-%s' "$issue" "$slug"
+}
+
+# An issue gets its own branch, so a run started from the wrong place cannot
+# quietly pile one issue's commits onto another issue's branch.
+base=$(git rev-parse --abbrev-ref HEAD)
+
+# An issue is identified by its number, not by the exact branch name: a branch
+# named by hand belongs to the issue just as much as a derived one does, and
+# resuming must find it rather than start the issue over on a second branch.
+existing=""
+if [ -n "$branch_arg" ]; then
+  git show-ref --verify --quiet "refs/heads/$branch_arg" && existing="$branch_arg"
+else
+  existing=$(git for-each-ref --format='%(refname:short)' "refs/heads/feat/issue-$issue-*" | head -1)
+fi
+branch="${branch_arg:-${existing:-$(derive_branch)}}"
+
+if [ "$branch" = "$base" ]; then
+  echo "==> already on $branch, resuming issue #$issue"
+elif [ -n "$existing" ]; then
+  echo "==> resuming issue #$issue on existing branch $branch"
+  git switch "$branch" || die "Could not switch to the existing branch $branch."
+else
+  # Starting a new issue. Everything below refuses rather than improvises: a
+  # wrong base is not visible in the commits it produces, so it has to be caught
+  # here or not at all.
+
+  # Uncommitted work would be carried onto a branch it does not belong to and
+  # attributed to this issue by the first step that commits.
+  [ -z "$(git status --porcelain)" ] ||
+    die "Working tree is dirty; commit or stash before starting issue #$issue."
+
+  default_branch=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null)
+  default_branch="${default_branch#origin/}"
+  [ -n "$default_branch" ] || default_branch=main
+
+  # A new issue starts from the default branch. Anything else means unmerged
+  # work is in the base, which is exactly the dependency this refuses to stack.
+  [ "$base" = "$default_branch" ] ||
+    die "Refusing to start issue #$issue from '$base'. Merge that work into '$default_branch' and check it out first."
+
+  # Blocking issues must be closed. Closed is not the same as merged, but the
+  # base check above covers the merge; this covers the ones not yet finished.
+  open_blockers=$(gh issue view "$issue" --json blockedBy \
+    -q '[.blockedBy.nodes[]? | select(.state == "OPEN") | "#\(.number)"] | join(", ")' 2>/dev/null)
+  [ -z "$open_blockers" ] ||
+    die "Issue #$issue is blocked by $open_blockers. Finish and merge those first."
+
+  echo "==> starting issue #$issue on new branch $branch, cut from $base ($(git rev-parse --short HEAD))"
+  git switch -c "$branch" || die "Could not create the branch $branch."
+fi
 
 for ((i = 1; i <= max; i++)); do
   before_open=$(unchecked)
   if [ "$before_open" -eq 0 ]; then
     echo "==> no unchecked steps left after $((i - 1)) session(s)"
     notify "$repo #$issue complete" high white_check_mark \
-      "Every step done on $branch. Ready for a PR."
+      "Every step done on $branch. Ready to review and integrate."
     exit 0
   fi
 
