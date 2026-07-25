@@ -40,7 +40,51 @@
 
 set -uo pipefail
 
-issue="${1:?usage: advance-issue-loop.sh <issue-number> [max-sessions] [branch] [effort]}"
+usage() {
+  cat <<'EOF'
+Run one fresh `claude -p` session per unchecked step of a GitHub issue, driving
+the advance-issue-step skill, until no unchecked steps remain.
+
+usage: advance-issue-loop.sh <issue-number> [max-sessions] [branch] [effort]
+       advance-issue-loop.sh -h | --help
+
+Arguments:
+  issue-number   GitHub issue to work through, in the current repository.
+  max-sessions   Cap on sessions before the loop gives up (default 20).
+  branch         Branch to work on. Defaults to the existing
+                 feat/issue-<n>-* branch if there is one, otherwise a new
+                 branch named from the issue title. Pass "" to keep the
+                 default while setting the effort.
+  effort         Reasoning effort for every session: low, medium, high,
+                 xhigh, or max (default medium).
+
+Environment:
+  NTFY_TOPIC     ntfy topic for step, completion, and early-stop notifications.
+                 Falls back to NTFY_TOPIC in the repository's .env, then to the
+                 first line of ~/.config/ntfy/topic. Unset means no notifying.
+  NTFY_URL       ntfy server, from the environment or .env (default
+                 https://ntfy.sh).
+
+Examples:
+  advance-issue-loop.sh 54
+  advance-issue-loop.sh 54 5
+  advance-issue-loop.sh 54 20 "" high
+  advance-issue-loop.sh 54 20 feat/issue-54-cutover max
+EOF
+}
+
+case "${1:-}" in
+  -h | --help)
+    usage
+    exit 0
+    ;;
+  '')
+    usage >&2
+    exit 1
+    ;;
+esac
+
+issue="$1"
 max="${2:-20}"
 branch_arg="${3:-}"
 effort="${4:-medium}"
@@ -49,7 +93,11 @@ effort="${4:-medium}"
 # not fail once per session after the branch has already been created.
 case "$effort" in
   low|medium|high|xhigh|max) ;;
-  *) echo "!! invalid effort '$effort'; expected low, medium, high, xhigh, or max" >&2; exit 1 ;;
+  *)
+    echo "!! invalid effort '$effort'; expected low, medium, high, xhigh, or max" >&2
+    echo "   see: advance-issue-loop.sh --help" >&2
+    exit 1
+    ;;
 esac
 
 repo_root=$(git rev-parse --show-toplevel)
