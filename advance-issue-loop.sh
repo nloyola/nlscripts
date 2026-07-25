@@ -17,9 +17,9 @@
 # them, so the base a step is written against is the base it will be merged to.
 # Resuming an existing issue branch skips these checks.
 #
-# Push notifications go to ntfy on two occasions only: every step done, and any
-# early stop. Per-step progress goes to stdout, not to your phone. Every abnormal
-# exit notifies, so silence means the loop is still working rather than dead.
+# Push notifications go to ntfy as each step lands, when every step is done, and
+# on any early stop. Every abnormal exit notifies, so silence means the loop is
+# still working rather than dead.
 #
 # The topic is looked up fresh on every notification, so it can be added to a
 # running loop:
@@ -148,6 +148,11 @@ else
   git switch -c "$branch" || die "Could not create the branch $branch."
 fi
 
+# Counted once, over ticked and unticked alike, so progress is reported against
+# the whole issue. A resumed run says 6/9 rather than restarting the count at
+# whatever was left when it began.
+total=$(gh issue view "$issue" --json body -q .body | grep -c '^- \[')
+
 for ((i = 1; i <= max; i++)); do
   before_open=$(unchecked)
   if [ "$before_open" -eq 0 ]; then
@@ -175,6 +180,8 @@ for ((i = 1; i <= max; i++)); do
     die "Push of $branch failed after session $i."
 
   echo "==> session $i done: $after_open step(s) remaining"
+  notify "$repo #$issue step done" low heavy_check_mark \
+    "$((total - after_open))/$total on $branch. $(git log --oneline -1)"
 done
 
 die "Hit the $max session cap with $(unchecked) step(s) still open."
