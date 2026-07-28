@@ -24,16 +24,17 @@
 # on any early stop. Every abnormal exit notifies, so silence means the loop is
 # still working rather than dead.
 #
-# The topic is looked up fresh on every notification, so it can be added to a
-# running loop:
+# The topic comes from the first of these that is set:
 #
 #   1. NTFY_TOPIC in the environment
 #   2. NTFY_TOPIC in the repository's .env      <- gitignored, per-project
 #   3. the first line of ~/.config/ntfy/topic
 #
+# A run with no topic anywhere refuses to start. It is looked up fresh on every
+# notification even so, so it can be repointed mid-run.
+#
 # NTFY_URL, from the environment or .env, overrides the server (default
-# https://ntfy.sh). With no topic configured the loop notifies nothing and is
-# otherwise unchanged.
+# https://ntfy.sh).
 #
 # An ntfy.sh topic is a shared secret: anyone who knows it can read and post to
 # it. Keep it in .env, never in a committed file, and pick an unguessable name.
@@ -61,7 +62,8 @@ Arguments:
 Environment:
   NTFY_TOPIC     ntfy topic for step, completion, and early-stop notifications.
                  Falls back to NTFY_TOPIC in the repository's .env, then to the
-                 first line of ~/.config/ntfy/topic. Unset means no notifying.
+                 first line of ~/.config/ntfy/topic. Required: with no topic
+                 from any of the three the loop refuses to start.
   NTFY_URL       ntfy server, from the environment or .env (default
                  https://ntfy.sh).
 
@@ -111,13 +113,31 @@ from_env_file() {
     tail -n1 | sed -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'\$/\1/"
 }
 
-# notify <title> <priority> <tags> <message>
-notify() {
-  local topic url
+resolve_topic() {
+  local topic
   topic="${NTFY_TOPIC:-$(from_env_file NTFY_TOPIC)}"
   if [ -z "$topic" ] && [ -r "$HOME/.config/ntfy/topic" ]; then
     topic=$(head -n1 "$HOME/.config/ntfy/topic")
   fi
+  printf '%s' "$topic"
+}
+
+# A loop nobody can hear is a loop nobody is watching: it runs unattended for
+# hours, and every early stop - the failure this whole script is shaped around
+# reporting - lands in silence. Refuse to start rather than run blind.
+if [ -z "$(resolve_topic)" ]; then
+  echo "!! no ntfy topic configured; refusing to start" >&2
+  echo "   set NTFY_TOPIC, or add it to $env_file, or write it to $HOME/.config/ntfy/topic" >&2
+  echo "   see: advance-issue-loop.sh --help" >&2
+  exit 1
+fi
+
+# notify <title> <priority> <tags> <message>
+notify() {
+  local topic url
+  # Resolved per call so the topic can be repointed mid-run. Still guarded: it
+  # was present at startup, but .env can be edited under a running loop.
+  topic=$(resolve_topic)
   [ -n "$topic" ] || return 0
 
   url="${NTFY_URL:-$(from_env_file NTFY_URL)}"
