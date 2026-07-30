@@ -24,6 +24,41 @@
 # what the step is doing while it does it rather than only once it ends. Needs
 # jq; without it the loop still runs, just quietly.
 #
+# Watching it in herdr
+# --------------------
+#
+# Run the loop in a pane of its own, not from inside an agent's conversation.
+# The point of the loop is that every step gets a fresh session, and an agent
+# that drives it is carrying every step's context in its own window, which is
+# the thing the loop exists to avoid.
+#
+# From a shell in herdr, split a pane and start it there:
+#
+#   herdr pane split "$(herdr pane list | jq -r '.result.panes[] | select(.focused) | .pane_id')" \
+#     --direction right --no-focus
+#   herdr pane run <new-pane-id> "advance-issue-loop.sh 54"
+#
+# `pane split` prints the new id at .result.pane.pane_id. Read it from that
+# response rather than guessing: herdr's ids compact when panes close, so an id
+# from an earlier layout can belong to a different pane later. `herdr pane list`
+# is the way back to current ones.
+#
+# Then watch it without sitting on it. These are the lines worth waiting for -
+# every one of them is printed by this script, so they are stable:
+#
+#   herdr wait output <pane> --match '==> session [0-9]+ done' --regex --timeout 3600000
+#   herdr wait output <pane> --match '==> no unchecked steps left' --timeout 86400000
+#   herdr pane read  <pane> --source recent --lines 40
+#
+# Timeouts are milliseconds, and a step can take an hour, so size them for the
+# work rather than the default. `wait output` matches future output only, so
+# start the wait before the step you mean to catch, and use `pane read` for what
+# has already scrolled past.
+#
+# Every early stop prints a line starting with `!!` and notifies ntfy, so a
+# `wait` that times out means slow, not dead - check `pane read` before assuming
+# the run is gone.
+#
 # Push notifications go to ntfy as each step lands, when every step is done, and
 # on any early stop. Every abnormal exit notifies, so silence means the loop is
 # still working rather than dead.
