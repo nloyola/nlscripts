@@ -43,6 +43,13 @@
 # every step gets a fresh session, and an agent that drives it carries every
 # step's context in its own window - the thing the loop exists to avoid.
 #
+# The pane reports itself to herdr's sidebar as it goes: working while a session
+# runs, done when every step is finished, blocked on an early stop. It has to say
+# so explicitly, because herdr infers a working agent from the OSC title the
+# claude TUI sets, and the sessions here are headless `claude -p` with no TUI and
+# no title. Without the reporting the pane sits at idle for the whole run and an
+# hour of work looks like an asleep pane.
+#
 # Driving it from an agent, or from a script
 # -----------------------------------------
 #
@@ -258,9 +265,55 @@ notify() {
     "$url/$topic" >/dev/null 2>&1 || true
 }
 
+# herdr detects a working agent from the OSC terminal title its TUI sets, and the
+# agent here is `claude -p`: headless, no TUI, no title. Nothing matches, so the
+# pane falls back to `idle` for the whole run and an hour of work reads as an
+# asleep pane in the sidebar. The loop knows its own state exactly, so it says so
+# rather than being guessed at.
+#
+# herdr_state <idle|working|blocked> [message]
+#
+# A no-op outside herdr, and never fatal: a sidebar that is wrong must not stop
+# the work. `--seq` is a staleness guard, so it has to increase monotonically -
+# reports that go backwards are dropped as out of order.
+herdr_seq=0
+herdr_state() {
+  [ "${HERDR_ENV:-}" = 1 ] && [ -n "${HERDR_PANE_ID:-}" ] || return 0
+  command -v herdr >/dev/null 2>&1 || return 0
+
+  local args
+  herdr_seq=$((herdr_seq + 1))
+  args=(report-agent "$HERDR_PANE_ID"
+    --source advance-issue-loop
+    --agent "issue #$issue"
+    --state "$1"
+    --seq "$herdr_seq")
+  [ -z "${2:-}" ] || args+=(--message "$2")
+
+  herdr pane "${args[@]}" >/dev/null 2>&1 || true
+}
+
+# Ctrl-C means the pane has been handed back, so hand the state back with it:
+# stand down from working, then drop authority and let herdr's own detection
+# describe whatever runs there next. Releasing while still reporting `working`
+# would strand the sidebar on a session that is no longer running.
+herdr_release() {
+  [ "${HERDR_ENV:-}" = 1 ] && [ -n "${HERDR_PANE_ID:-}" ] || return 0
+  command -v herdr >/dev/null 2>&1 || return 0
+
+  herdr_state idle "interrupted"
+  herdr pane release-agent "$HERDR_PANE_ID" \
+    --source advance-issue-loop --agent "issue #$issue" >/dev/null 2>&1 || true
+}
+
+trap 'herdr_release; exit 130' INT TERM
+
 # Every early exit goes through here, so no failure path can end up silent.
 die() {
   echo "!! $1"
+  # Blocked rather than idle: an early stop is waiting for a human, and the
+  # sidebar should say so as loudly as ntfy does.
+  herdr_state blocked "$1"
   notify "$repo #$issue stopped" urgent rotating_light "$1"
   exit 1
 }
@@ -480,6 +533,9 @@ for ((i = 1; i <= max; i++)); do
   before_open=$(unchecked)
   if [ "$before_open" -eq 0 ]; then
     echo "==> no unchecked steps left after $((i - 1)) session(s)"
+    # herdr turns a reported idle that follows working into `done`, which is the
+    # state it means by finished-but-not-yet-looked-at. Exactly right here.
+    herdr_state idle "every step done on $branch"
     notify "$repo #$issue complete" high white_check_mark \
       "Every step done on $branch. Ready to review and integrate."
     exit 0
@@ -490,6 +546,7 @@ for ((i = 1; i <= max; i++)); do
 
   before_head=$(git rev-parse HEAD)
   echo "==> session $i starting at $effort effort: $before_open step(s) remaining"
+  herdr_state working "session $i, $((total - before_open))/$total done"
 
   run_session "Use the advance-issue-step skill to implement the next unchecked step of GitHub issue #$issue. Stay on the current branch ($branch); do not create, switch, or merge branches, and do not open a pull request." ||
     die "Session $i exited non-zero. $before_open step(s) still open."
