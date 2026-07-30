@@ -79,14 +79,29 @@
 # Then watch the pane without sitting on it. These are the lines worth waiting
 # for - every one of them is printed by this script, so they are stable:
 #
-#   herdr wait output "$pane" --match '==> session [0-9]+ done' --regex --timeout 3600000
-#   herdr wait output "$pane" --match '==> no unchecked steps left' --timeout 86400000
-#   herdr pane read  "$pane" --source recent --lines 40
+#   herdr pane wait-output "$pane" --regex '==> session [0-9]+ done' --timeout 3600000
+#   herdr pane wait-output "$pane" --match '==> no unchecked steps left' --timeout 86400000
+#   herdr pane read       "$pane" --source recent --lines 40
+#
+# `--match` is a literal substring and `--regex` is a pattern; they are separate
+# flags, so pass one or the other rather than both.
 #
 # Timeouts are milliseconds, and a step can take an hour, so size them for the
-# work rather than the default. `wait output` matches future output only, so
-# start the wait before the step you mean to catch, and use `pane read` for what
-# has already scrolled past.
+# work rather than the default.
+#
+# `wait-output` searches the existing snapshot before it polls, so it is not a
+# wait for the *next* occurrence: a pattern already on screen returns at once.
+# `==> session [0-9]+ done` therefore matches session 1 while session 4 is
+# running. Wait on the exact text you mean - `==> session 4 done` - or narrow the
+# snapshot with `--lines`. `pane read` is for what has already scrolled past.
+#
+# Because the loop reports its own state to herdr (see herdr_state below), the
+# lifecycle is also waitable directly, without matching on output at all:
+#
+#   herdr agent wait "$pane" --until blocked --until done --timeout 86400000
+#
+# `done` is every step finished; `blocked` is any early stop. Note `--until`, and
+# that omitting it waits for idle, done, or blocked.
 #
 # Every early stop prints a line starting with `!!` and notifies ntfy, so a
 # `wait` that times out means slow, not dead - check `pane read` before assuming
