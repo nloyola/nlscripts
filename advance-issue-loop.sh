@@ -39,23 +39,30 @@
 # that drives it is carrying every step's context in its own window, which is
 # the thing the loop exists to avoid.
 #
-# From a shell in herdr, split a pane and start it there:
+# From a shell in herdr, split a pane and start it there. `pane split` prints the
+# id of the pane it created at .result.pane.pane_id, so capture that rather than
+# typing an id: herdr's ids compact when panes close, so an id from an earlier
+# layout can belong to a different pane later. `herdr pane list` is the way back
+# to current ones.
 #
-#   herdr pane split "$(herdr pane list | jq -r '.result.panes[] | select(.focused) | .pane_id')" \
-#     --direction right --no-focus
-#   herdr pane run <new-pane-id> "advance-issue-loop.sh 54"
+#   here=$(herdr pane list | jq -r '.result.panes[] | select(.focused) | .pane_id')
+#   pane=$(herdr pane split "$here" --direction right --no-focus |
+#            jq -r '.result.pane.pane_id')
+#   herdr pane run "$pane" "advance-issue-loop.sh 54"
 #
-# `pane split` prints the new id at .result.pane.pane_id. Read it from that
-# response rather than guessing: herdr's ids compact when panes close, so an id
-# from an earlier layout can belong to a different pane later. `herdr pane list`
-# is the way back to current ones.
+# $pane is what every command below wants. For the split output
+#
+#   {"id":"cli:pane:split","result":{"pane":{...,"pane_id":"w1J:p4",...}}}
+#
+# it is w1J:p4 - the pane_id inside result.pane, not the tab_id, terminal_id, or
+# workspace_id alongside it.
 #
 # Then watch it without sitting on it. These are the lines worth waiting for -
 # every one of them is printed by this script, so they are stable:
 #
-#   herdr wait output <pane> --match '==> session [0-9]+ done' --regex --timeout 3600000
-#   herdr wait output <pane> --match '==> no unchecked steps left' --timeout 86400000
-#   herdr pane read  <pane> --source recent --lines 40
+#   herdr wait output "$pane" --match '==> session [0-9]+ done' --regex --timeout 3600000
+#   herdr wait output "$pane" --match '==> no unchecked steps left' --timeout 86400000
+#   herdr pane read  "$pane" --source recent --lines 40
 #
 # Timeouts are milliseconds, and a step can take an hour, so size them for the
 # work rather than the default. `wait output` matches future output only, so
