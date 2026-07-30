@@ -2,7 +2,7 @@
 # Run one fresh `claude -p` session per unchecked step of a GitHub issue, driving
 # the advance-issue-step skill, until no unchecked steps remain.
 #
-#   advance-issue-loop.sh <issue-number> [max-sessions] [branch] [effort]
+#   advance-issue-loop.sh [--here] <issue-number> [max-sessions] [branch] [effort]
 #
 # Every session runs at the same reasoning effort, defaulting to medium. Pass
 # one of low, medium, high, xhigh, or max to raise or lower it for a whole run.
@@ -19,6 +19,13 @@
 # the point: dependencies are satisfied by merging them, not by branching off
 # them, so the base a step is written against is the base it will be merged to.
 # Resuming an existing issue branch skips these checks.
+#
+# `--here` works the issue on the branch already checked out, whatever it is
+# named, and skips those start-of-issue checks the same way resuming does. Use it
+# when the work belongs on a branch that is already going - a scratch branch, or
+# an issue whose steps continue work not yet merged. It is the one way to run an
+# issue from a dirty tree, so the uncommitted changes are yours to account for:
+# the first step that commits will sweep up anything it happens to touch.
 #
 # Each session streams a line per tool call as it works, so the terminal shows
 # what the step is doing while it does it rather than only once it ends. Needs
@@ -85,8 +92,15 @@ usage() {
 Run one fresh `claude -p` session per unchecked step of a GitHub issue, driving
 the advance-issue-step skill, until no unchecked steps remain.
 
-usage: advance-issue-loop.sh <issue-number> [max-sessions] [branch] [effort]
+usage: advance-issue-loop.sh [--here] <issue-number> [max-sessions] [branch] [effort]
        advance-issue-loop.sh -h | --help
+
+Options:
+  --here         Work the issue on the currently checked-out branch instead of
+                 cutting a new one, and skip the start-of-issue checks: a clean
+                 tree, the default branch as the base, and closed blockers.
+                 Refuses on a detached HEAD or on the default branch itself,
+                 and cannot be combined with an explicit branch argument.
 
 Arguments:
   issue-number   GitHub issue to work through, in the current repository.
@@ -108,27 +122,62 @@ Environment:
 
 Examples:
   advance-issue-loop.sh 54
+  advance-issue-loop.sh --here 54
   advance-issue-loop.sh 54 5
   advance-issue-loop.sh 54 20 "" high
   advance-issue-loop.sh 54 20 feat/issue-54-cutover max
 EOF
 }
 
-case "${1:-}" in
-  -h | --help)
-    usage
-    exit 0
-    ;;
-  '')
-    usage >&2
-    exit 1
-    ;;
-esac
+# Options are pulled out wherever they appear, so `--here 54` and `54 --here`
+# both work and the positional slots keep their meaning either way.
+here=false
+args=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    --here | --current-branch)
+      here=true
+      ;;
+    --)
+      shift
+      while [ $# -gt 0 ]; do
+        args+=("$1")
+        shift
+      done
+      break
+      ;;
+    -*)
+      echo "!! unknown option '$1'" >&2
+      echo "   see: advance-issue-loop.sh --help" >&2
+      exit 1
+      ;;
+    *)
+      args+=("$1")
+      ;;
+  esac
+  shift
+done
 
-issue="$1"
-max="${2:-20}"
-branch_arg="${3:-}"
-effort="${4:-medium}"
+if [ "${#args[@]}" -eq 0 ]; then
+  usage >&2
+  exit 1
+fi
+
+issue="${args[0]}"
+max="${args[1]:-20}"
+branch_arg="${args[2]:-}"
+effort="${args[3]:-medium}"
+
+# --here names the branch by pointing at it; a second name would contradict it.
+if [ "$here" = true ] && [ -n "$branch_arg" ]; then
+  echo "!! --here and an explicit branch argument ('$branch_arg') conflict; pass one or the other" >&2
+  echo "   see: advance-issue-loop.sh --help" >&2
+  exit 1
+fi
 
 # Checked here rather than left to claude: an invalid level should cost nothing,
 # not fail once per session after the branch has already been created.
@@ -321,9 +370,39 @@ derive_branch() {
   printf 'feat/issue-%s-%s' "$issue" "$slug"
 }
 
+# Where finished issues land, so never where an issue's steps are written.
+resolve_default_branch() {
+  local d
+  d=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null)
+  d="${d#origin/}"
+  printf '%s' "${d:-main}"
+}
+
 # An issue gets its own branch, so a run started from the wrong place cannot
 # quietly pile one issue's commits onto another issue's branch.
 base=$(git rev-parse --abbrev-ref HEAD)
+
+# --here names the branch by pointing at it, which is the same thing as passing
+# its name, so it resolves to a branch argument and takes the resume path below.
+if [ "$here" = true ]; then
+  [ "$base" != HEAD ] ||
+    die "--here needs a branch checked out; HEAD is detached."
+
+  # Every step commits and pushes. On the default branch that is a push straight
+  # to the trunk, one per step, with no chance to review the issue as a whole.
+  [ "$base" != "$(resolve_default_branch)" ] ||
+    die "Refusing to work issue #$issue directly on '$base'. --here is for a feature branch: check one out, or drop --here to have one cut for you."
+
+  branch_arg="$base"
+
+  # The dirty-tree check is skipped, not passed. Say so, because the first step
+  # that commits will sweep up whatever it happens to touch.
+  dirty=$(git status --porcelain)
+  if [ -n "$dirty" ]; then
+    echo "==> note: working tree is dirty and --here does not stop for it:"
+    printf '%s\n' "$dirty" | sed 's/^/      /'
+  fi
+fi
 
 # An issue is identified by its number, not by the exact branch name: a branch
 # named by hand belongs to the issue just as much as a derived one does, and
@@ -337,7 +416,11 @@ fi
 branch="${branch_arg:-${existing:-$(derive_branch)}}"
 
 if [ "$branch" = "$base" ]; then
-  echo "==> already on $branch, resuming issue #$issue"
+  if [ "$here" = true ]; then
+    echo "==> --here: working issue #$issue on the current branch $branch ($(git rev-parse --short HEAD))"
+  else
+    echo "==> already on $branch, resuming issue #$issue"
+  fi
 elif [ -n "$existing" ]; then
   echo "==> resuming issue #$issue on existing branch $branch"
   git switch "$branch" || die "Could not switch to the existing branch $branch."
@@ -349,11 +432,9 @@ else
   # Uncommitted work would be carried onto a branch it does not belong to and
   # attributed to this issue by the first step that commits.
   [ -z "$(git status --porcelain)" ] ||
-    die "Working tree is dirty; commit or stash before starting issue #$issue."
+    die "Working tree is dirty; commit or stash before starting issue #$issue, or pass --here to work it on '$base' as it stands. Note that 'git stash' leaves untracked files behind - 'git stash -u' includes them."
 
-  default_branch=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null)
-  default_branch="${default_branch#origin/}"
-  [ -n "$default_branch" ] || default_branch=main
+  default_branch=$(resolve_default_branch)
 
   # A new issue starts from the default branch. Anything else means unmerged
   # work is in the base, which is exactly the dependency this refuses to stack.
