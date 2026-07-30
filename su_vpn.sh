@@ -141,10 +141,74 @@ warn_if_tailscale_exit_node() {
   fi
 }
 
+resolves_external_via() {
+  # True if $1 can resolve a public name. one.one.one.one is short, stable, and
+  # not the sort of thing a LAN Pi-hole blocklist touches. Captured into a
+  # variable rather than piped into `grep -q`, because grep would exit on the
+  # first match, SIGPIPE dig, and `set -o pipefail` would then report the whole
+  # pipeline as failed even though the name resolved.
+  local server="$1" answer
+  answer="$(timeout 3 dig +short +time=2 +tries=1 A one.one.one.one "@$server" 2>/dev/null \
+    | grep -m1 -E '^[0-9]+(\.[0-9]+){3}$' || true)"
+  [[ -n "$answer" ]]
+}
+
+reference_resolver() {
+  # A resolver to sanity-check a failing probe against, so a plain internet or
+  # upstream-DNS outage is not misread as broken local DNS config. Prefer
+  # systemd-resolved's stub, whose per-link config NetworkManager restores on its
+  # own; otherwise the first nameserver NetworkManager knows about that isn't one
+  # of Tailscale's own listeners.
+  if systemctl is-active --quiet systemd-resolved 2>/dev/null \
+     && [[ -e /run/systemd/resolve/stub-resolv.conf ]]; then
+    echo 127.0.0.53
+    return 0
+  fi
+  awk '/^nameserver / && $2 != "100.100.100.100" && $2 !~ /^fd7a:/ { print $2; exit }' \
+    /run/NetworkManager/resolv.conf /etc/resolv.conf 2>/dev/null || true
+}
+
+resolv_conf_dns_broken() {
+  # The failure this catches: FortiClient replaces /etc/resolv.conf with a flat
+  # file while connected, which drops tailscaled out of systemd-resolved per-link
+  # mode into direct mode. In direct mode it writes itself (100.100.100.100) into
+  # resolv.conf as the *only* nameserver and must forward everything, using the
+  # base resolvers it snapshotted when it took over - the VPN's. Those are
+  # unreachable once the tunnel is gone, so every lookup dies, and restoring the
+  # stub symlink does not clear the snapshot. A daemon restart re-detects
+  # resolved and reinstalls per-link config.
+  #
+  # nsswitch consumers (getent, curl, ssh, browsers) never notice, because
+  # resolved's own per-link config recovers on disconnect. Anything reading
+  # /etc/resolv.conf directly does: nix eats curl's 15s DNS timeout per lookup
+  # and silently falls back to cached flake pins.
+  #
+  # Probe exactly what resolv.conf names, nothing else. Do NOT probe
+  # 100.100.100.100 as such: in resolved mode it correctly refuses to forward
+  # anything but ts.net (Tailscale installs split-DNS routes and lets resolved
+  # handle the rest), so treating that as a fault would restart tailscaled on
+  # every healthy teardown.
+  command -v dig >/dev/null 2>&1 || return 1
+  local server saw_any=0
+  while read -r server; do
+    saw_any=1
+    resolves_external_via "$server" && return 1
+  done < <(awk '/^nameserver / { print $2 }' /etc/resolv.conf 2>/dev/null)
+  [[ "$saw_any" == 1 ]] || return 1
+
+  # Every listed resolver failed. Only call it broken if a reference resolver
+  # can in fact resolve - otherwise this is an outage, not a config problem.
+  local reference
+  reference="$(reference_resolver)"
+  [[ -n "$reference" ]] || return 1
+  resolves_external_via "$reference"
+}
+
 reassert_tailscale() {
   # Our default-route churn during connect (delete default, reconnect) can race
   # tailscaled and leave tailscale0 down with no tailnet routes and MagicDNS
-  # stripped from /etc/resolv.conf by our flat-file resolv restore. Called from
+  # stripped from /etc/resolv.conf by our flat-file resolv restore, or leave the
+  # daemon forwarding to the VPN's now-unreachable resolvers. Called from
   # restore_routes so every teardown leaves Tailscale intact. Respects the
   # user's prefs: only acts when Tailscale is meant to be running.
   command -v tailscale >/dev/null 2>&1 || return 0
@@ -166,6 +230,14 @@ reassert_tailscale() {
     # no pref changes). On resolved hosts resolv.conf is a symlink and MagicDNS
     # lives in resolved's per-link config, so this branch is skipped.
     sudo tailscale set --accept-dns=true 2>/dev/null || true
+  elif resolv_conf_dns_broken; then
+    # Nothing in resolv.conf resolves, but a reference resolver does - tailscaled
+    # is in direct mode forwarding to the VPN's dead resolvers (see the probe
+    # above). Only a restart makes it re-read the base config. Gated on the probe
+    # rather than run on every teardown, because a restart briefly drops the
+    # tailnet - which would cut off anyone running this over Tailscale SSH.
+    echo "su_vpn.sh: no resolver in /etc/resolv.conf works; restarting tailscaled." >&2
+    sudo systemctl restart tailscaled 2>/dev/null || true
   fi
 }
 
