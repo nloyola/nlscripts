@@ -20,6 +20,10 @@
 # them, so the base a step is written against is the base it will be merged to.
 # Resuming an existing issue branch skips these checks.
 #
+# Each session streams a line per tool call as it works, so the terminal shows
+# what the step is doing while it does it rather than only once it ends. Needs
+# jq; without it the loop still runs, just quietly.
+#
 # Push notifications go to ntfy as each step lands, when every step is done, and
 # on any early stop. Every abnormal exit notifies, so silence means the loop is
 # still working rather than dead.
@@ -158,6 +162,66 @@ die() {
   exit 1
 }
 
+# `claude -p` in its default text format prints nothing until the session ends,
+# so a step that takes twenty minutes shows twenty minutes of an empty terminal.
+# That reads the same as a hung loop, and this loop is meant to be watched while
+# it runs unattended. The stream-json format emits an event per turn instead;
+# this renders those events as one line per tool call and per reply.
+#
+# The final report is printed in full: it is the same handoff the session posts
+# as an issue comment, and it is what tells you whether the step went the way
+# the body planned.
+progress_filter=$(
+  cat <<'JQ'
+def oneline: tostring | gsub("[\r\n\t]+"; " ") | gsub("  +"; " ");
+def pad($n): . + ((" " * ($n - length)) // "");
+def clip($n): if (length > $n) then .[0:$n - 1] + "…" else . end;
+def line($tag): "  · " + ($tag | pad(9)) + .;
+
+if .type == "assistant" then
+  .message.content[]?
+  | if .type == "tool_use" then
+      (.name as $tag
+       | (.input.command // .input.file_path // .input.pattern // .input.skill
+          // .input.description // .input.prompt // .input.url // "")
+       | oneline | clip(100) | line($tag))
+    elif .type == "text" and (.text | test("[^[:space:]]")) then
+      (.text | oneline | clip(100) | line("reply"))
+    else empty end
+elif .type == "result" then
+  ("" | line("result")) + .subtype
+    + " in \(.num_turns) turns, \(((.duration_ms // 0) / 1000) | round)s",
+  ((.result // "") | select(test("[^[:space:]]")) | split("\n")[] | "    " + .)
+else empty end
+JQ
+)
+
+# Rendering the stream needs jq. Falling back rather than refusing: thin output
+# is a worse loop, not a broken one, and the loop's own reporting still works.
+stream=1
+if ! command -v jq >/dev/null 2>&1; then
+  stream=""
+  echo "!! jq not found; running without live progress" >&2
+fi
+
+# run_session <prompt>
+#
+# Returns claude's own exit status, not the renderer's: a jq hiccup must not be
+# reported as a failed step, and a failed step must not be hidden by a renderer
+# that exited cleanly on partial input.
+run_session() {
+  if [ -z "$stream" ]; then
+    claude -p --permission-mode acceptEdits --effort "$effort" "$1"
+    return $?
+  fi
+
+  claude -p --output-format stream-json --verbose \
+    --permission-mode acceptEdits --effort "$effort" "$1" |
+    jq -r --unbuffered "$progress_filter"
+  local rc=${PIPESTATUS[0]}
+  return "$rc"
+}
+
 unchecked() {
   gh issue view "$issue" --json body -q .body | grep -c '^- \[ \]' || true
 }
@@ -292,8 +356,7 @@ for ((i = 1; i <= max; i++)); do
   before_head=$(git rev-parse HEAD)
   echo "==> session $i starting at $effort effort: $before_open step(s) remaining"
 
-  claude -p --permission-mode acceptEdits --effort "$effort" \
-    "Use the advance-issue-step skill to implement the next unchecked step of GitHub issue #$issue. Stay on the current branch ($branch); do not create, switch, or merge branches, and do not open a pull request." ||
+  run_session "Use the advance-issue-step skill to implement the next unchecked step of GitHub issue #$issue. Stay on the current branch ($branch); do not create, switch, or merge branches, and do not open a pull request." ||
     die "Session $i exited non-zero. $before_open step(s) still open."
 
   [ "$(git rev-parse HEAD)" != "$before_head" ] ||
