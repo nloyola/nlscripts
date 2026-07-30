@@ -31,19 +31,31 @@
 # what the step is doing while it does it rather than only once it ends. Needs
 # jq; without it the loop still runs, just quietly.
 #
-# Watching it in herdr
-# --------------------
+# Running it in herdr
+# -------------------
 #
-# Run the loop in a pane of its own, not from inside an agent's conversation.
-# The point of the loop is that every step gets a fresh session, and an agent
-# that drives it is carrying every step's context in its own window, which is
-# the thing the loop exists to avoid.
+# Open a pane and type the command. There is nothing to set up:
 #
-# From a shell in herdr, split a pane and start it there. `pane split` prints the
-# id of the pane it created at .result.pane.pane_id, so capture that rather than
-# typing an id: herdr's ids compact when panes close, so an id from an earlier
-# layout can belong to a different pane later. `herdr pane list` is the way back
-# to current ones.
+#   advance-issue-loop.sh 54
+#
+# The one rule is the pane. Give the loop a pane of its own and do not run it
+# from inside an agent's conversation, because the point of the loop is that
+# every step gets a fresh session, and an agent that drives it carries every
+# step's context in its own window - the thing the loop exists to avoid.
+#
+# Driving it from an agent, or from a script
+# -----------------------------------------
+#
+# Everything below is for a caller with no keyboard, which can only address a
+# pane by id. If you are typing, ignore it: $here and $pane are scratch shell
+# variables belonging to these examples, and the script itself reads nothing but
+# NTFY_TOPIC and NTFY_URL.
+#
+# Split a pane and start the loop in it. `pane split` prints the id of the pane
+# it created at .result.pane.pane_id, so capture that rather than typing an id:
+# herdr's ids compact when panes close, so an id from an earlier layout can
+# belong to a different pane later. `herdr pane list` is the way back to current
+# ones.
 #
 #   here=$(herdr pane list | jq -r '.result.panes[] | select(.focused) | .pane_id')
 #   pane=$(herdr pane split "$here" --direction right --no-focus |
@@ -57,8 +69,8 @@
 # it is w1J:p4 - the pane_id inside result.pane, not the tab_id, terminal_id, or
 # workspace_id alongside it.
 #
-# Then watch it without sitting on it. These are the lines worth waiting for -
-# every one of them is printed by this script, so they are stable:
+# Then watch the pane without sitting on it. These are the lines worth waiting
+# for - every one of them is printed by this script, so they are stable:
 #
 #   herdr wait output "$pane" --match '==> session [0-9]+ done' --regex --timeout 3600000
 #   herdr wait output "$pane" --match '==> no unchecked steps left' --timeout 86400000
