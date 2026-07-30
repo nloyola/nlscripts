@@ -7,8 +7,12 @@
 # Every session runs at the same reasoning effort, defaulting to medium. Pass
 # one of low, medium, high, xhigh, or max to raise or lower it for a whole run.
 #
-# Stops early if a session produces no commit or fails to tick its checkbox,
-# so a confused session cannot cascade into the following steps.
+# Stops early if a session fails to tick its checkbox, so a confused session
+# cannot cascade into the following steps. The tick is the authority on progress,
+# not the commit: a step can turn out to be a verification - it asks whether
+# something already holds, finds that it does, and has nothing to change. That is
+# a finished step, and the loop reports it as one. A session that neither ticked
+# nor committed did nothing at all, and that still stops the run.
 #
 # Every issue gets its own branch. Starting an issue creates one, named from the
 # issue title unless a name is given; resuming an issue whose branch already
@@ -566,19 +570,43 @@ for ((i = 1; i <= max; i++)); do
   run_session "Use the advance-issue-step skill to implement the next unchecked step of GitHub issue #$issue. Stay on the current branch ($branch); do not create, switch, or merge branches, and do not open a pull request." ||
     die "Session $i exited non-zero. $before_open step(s) still open."
 
-  [ "$(git rev-parse HEAD)" != "$before_head" ] ||
-    die "Session $i produced no commit. $before_open step(s) still open."
+  committed=false
+  [ "$(git rev-parse HEAD)" = "$before_head" ] || committed=true
 
   after_open=$(unchecked)
-  [ "$after_open" -lt "$before_open" ] ||
-    die "Session $i committed but ticked no checkbox. $before_open step(s) still open."
+  ticked=false
+  [ "$after_open" -ge "$before_open" ] || ticked=true
+
+  # The tick is what says the step is finished, so it is what the loop insists
+  # on. A commit without it is work nobody can account for; nothing at all is a
+  # session that failed silently. Either way the run stops here.
+  if [ "$ticked" = false ]; then
+    if [ "$committed" = true ]; then
+      die "Session $i committed but ticked no checkbox. $before_open step(s) still open."
+    fi
+    die "Session $i produced neither a commit nor a ticked checkbox. $before_open step(s) still open."
+  fi
+
+  # A ticked step with no commit is a verification: the step asked whether
+  # something already held and found that it did. Said out loud rather than
+  # passed over in silence, because it is also what a session looks like when it
+  # ticks a step it only convinced itself of, and that is worth a second look
+  # when the branch is reviewed.
+  if [ "$committed" = false ]; then
+    echo "==> session $i changed nothing: verification step, ticked with no commit"
+  fi
 
   git push origin "$branch" ||
     die "Push of $branch failed after session $i."
 
   echo "==> session $i done: $after_open step(s) remaining"
-  notify "$repo #$issue step done" low heavy_check_mark \
-    "$((total - after_open))/$total on $branch. $(git log --oneline -1)"
+  if [ "$committed" = true ]; then
+    notify "$repo #$issue step done" low heavy_check_mark \
+      "$((total - after_open))/$total on $branch. $(git log --oneline -1)"
+  else
+    notify "$repo #$issue step done" low heavy_check_mark \
+      "$((total - after_open))/$total on $branch. Verification step, no commit."
+  fi
 done
 
 die "Hit the $max session cap with $(unchecked) step(s) still open."
