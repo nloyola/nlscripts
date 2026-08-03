@@ -8,9 +8,32 @@ REPO=https://github.com/emacs-mirror/emacs.git
 HAVE_GCONF=0
 HAVE_XAW3D=0
 
+# Hosts that have no X server and always want a terminal-only Emacs.
+NOX_HOSTS=(
+    opentaproject
+)
+
 # Set EMACS_NOX=1 for a headless / terminal-only build (no X11, GTK, or image
-# libraries). Native compilation and tree-sitter are still enabled.
-NOX=${EMACS_NOX:-0}
+# libraries). Native compilation and tree-sitter are still enabled. Hosts listed
+# in NOX_HOSTS default to that build; EMACS_NOX still overrides either way.
+default_nox() {
+    local host
+    host=$(hostname -s 2>/dev/null || hostname)
+    local nox_host
+    for nox_host in "${NOX_HOSTS[@]}"; do
+        if [[ "$host" == "$nox_host" ]]; then
+            echo 1
+            return
+        fi
+    done
+    echo 0
+}
+
+NOX=${EMACS_NOX:-$(default_nox)}
+
+if [[ "$NOX" -eq 1 ]]; then
+    echo ">>> Building a terminal-only (-nw) Emacs: no X11, GTK, or image libraries."
+fi
 
 #CC=gcc-10
 CC=gcc
