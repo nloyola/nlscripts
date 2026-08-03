@@ -386,6 +386,21 @@ if ! command -v jq >/dev/null 2>&1; then
   echo "!! jq not found; running without live progress" >&2
 fi
 
+# Claude Code ships a herdr integration: a SessionStart hook that tells herdr the
+# pane now belongs to the session that just started. Every session this loop runs
+# fires it, and herdr honours that claim over this script's own reports, without
+# letting go the moment a headless `claude -p` exits. The loop's final report -
+# the one that says done, or blocked, and the only one anybody is waiting on -
+# therefore lands in a pane herdr still believes belongs to a running session and
+# is dropped. The sidebar keeps the last state it did accept, `working`, forever.
+#
+# The pane belongs to the loop, not to the sessions it spawns, so the sessions
+# run with the herdr environment hidden. The hook is a no-op without it - it
+# exits unless HERDR_ENV, HERDR_SOCKET_PATH, and HERDR_PANE_ID are all set - and
+# the reporting below is left as the pane's only voice. Nothing else is lost: a
+# `claude -p` with no terminal has nothing to say to herdr anyway.
+hide_herdr=(env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SOCKET_PATH)
+
 # run_session <prompt>
 #
 # Returns claude's own exit status, not the renderer's: a jq hiccup must not be
@@ -393,11 +408,11 @@ fi
 # that exited cleanly on partial input.
 run_session() {
   if [ -z "$stream" ]; then
-    claude -p --permission-mode acceptEdits --effort "$effort" "$1"
+    "${hide_herdr[@]}" claude -p --permission-mode acceptEdits --effort "$effort" "$1"
     return $?
   fi
 
-  claude -p --output-format stream-json --verbose \
+  "${hide_herdr[@]}" claude -p --output-format stream-json --verbose \
     --permission-mode acceptEdits --effort "$effort" "$1" |
     jq -r --unbuffered "$progress_filter"
   local rc=${PIPESTATUS[0]}
