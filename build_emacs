@@ -124,7 +124,10 @@ install_build_dependencies() {
     # X11, GTK, and image libraries are only needed for a GUI build.
     if [[ "$NOX" -ne 1 ]]; then
         packages+=(
+            libcairo2-dev
             libgif-dev
+            libglib2.0-dev
+            libgtk-3-dev
             libharfbuzz-dev
             libjpeg-dev
             libmagickwand-dev
