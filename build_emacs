@@ -187,6 +187,36 @@ version_ge() {
     dpkg --compare-versions "$1" ge "$2"
 }
 
+# configure silently drops optional features whose headers are missing, so a
+# build can succeed and only surface the gap much later at runtime (org-roam
+# needs sqlite). Fail the build instead, right after configure.
+assert_configured_features() {
+    local config_h="$DEST/src/config.h"
+    local feature
+    local missing=()
+
+    if [[ ! -f "$config_h" ]]; then
+        echo "ERROR: $config_h not found; did configure run?" >&2
+        exit 1
+    fi
+
+    for feature in "$@"; do
+        if ! grep -qE "^#define ${feature} 1$" "$config_h"; then
+            missing+=("$feature")
+        fi
+    done
+
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        echo "ERROR: configure did not enable required feature(s): ${missing[*]}" >&2
+        echo "       Check the configure summary and install the matching -dev package" >&2
+        echo "       (HAVE_SQLITE3 needs libsqlite3-dev, HAVE_TREE_SITTER needs" >&2
+        echo "       libtree-sitter-dev, and so on), then re-run this script." >&2
+        exit 1
+    fi
+
+    echo ">>> Verified configure enabled: $*"
+}
+
 fetch_latest_tree_sitter_version() {
     curl -fsSL "https://api.github.com/repos/tree-sitter/tree-sitter/releases/latest" \
         | python3 -c "import sys,json; print(json.load(sys.stdin)['tag_name'].lstrip('v'))"
@@ -356,5 +386,6 @@ cd "$DEST"
 make distclean || true
 ./autogen.sh
 ./configure "${configure_args[@]}" CC=$CC CFLAGS="$CFLAGS_MAD_SCIENTIST"
+assert_configured_features HAVE_SQLITE3 HAVE_TREE_SITTER HAVE_NATIVE_COMP HAVE_MODULES HAVE_GNUTLS
 make -j"$(nproc)"
 sudo make install
