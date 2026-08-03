@@ -295,7 +295,14 @@ notify() {
 # A no-op outside herdr, and never fatal: a sidebar that is wrong must not stop
 # the work. `--seq` is a staleness guard, so it has to increase monotonically -
 # reports that go backwards are dropped as out of order.
-herdr_seq=0
+#
+# herdr keeps that last seq per pane and source, and the source is fixed, so the
+# guard spans runs rather than just this one. Counting from zero meant a second
+# run in the same pane spent its whole life under the previous run's high-water
+# mark and had every report dropped, leaving the sidebar frozen on whatever the
+# old run last said - a finished loop still reading as `working`. Seconds since
+# the epoch start above any earlier run and still step by one per report.
+herdr_seq=$(date +%s)
 herdr_state() {
   [ "${HERDR_ENV:-}" = 1 ] && [ -n "${HERDR_PANE_ID:-}" ] || return 0
   command -v herdr >/dev/null 2>&1 || return 0
