@@ -91,6 +91,7 @@ install_build_dependencies() {
         libjansson-dev
         libmailutils-dev
         libncurses-dev
+        libsqlite3-dev
         libtree-sitter-dev
         libxml2-dev
         pkg-config
