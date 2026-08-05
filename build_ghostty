@@ -3,8 +3,6 @@ set -euo pipefail
 
 DEST=$HOME/src/github/ghostty
 REPO=https://github.com/ghostty-org/ghostty
-ZIG=/usr/local/bin/zig
-SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 install_build_dependencies() {
     echo ">>> Updating apt package metadata..."
@@ -40,15 +38,32 @@ required_zig_version() {
     echo "$version"
 }
 
-ensure_zig() {
+resolve_zig() {
+    # Home Manager installs one wrapper per Zig minor series (zig-0.15,
+    # zig-0.16, ...), so consumers that pin different versions can coexist.
+    # ghostty's requireZig wants the same major.minor and at least the stated
+    # patch, so the series wrapper is checked against that rule rather than
+    # against an exact string.
     local version="$1"
-    echo ">>> Ensuring zig ${version} via install_zig..."
-    "${SCRIPT_DIR}/install_zig" "$version"
+    local series="${version%.*}"
+    local binary="zig-${series}"
 
-    if [[ ! -x "${ZIG}" ]]; then
-        echo "ERROR: zig not found at ${ZIG} after install_zig ran." >&2
+    if ! command -v "$binary" >/dev/null; then
+        echo "ERROR: ${binary} not found on PATH." >&2
+        echo "       Add pkgs.zig_${series//./_} to nix/hosts/\$(hostname -s).nix" >&2
+        echo "       in home_config and run home-manager switch." >&2
         exit 1
     fi
+
+    local found
+    found=$("$binary" version)
+    if [[ "${found%.*}" != "$series" ]] \
+        || ! dpkg --compare-versions "$found" ge "$version"; then
+        echo "ERROR: ${binary} reports ${found}, but ghostty needs ${series}.x >= ${version}." >&2
+        exit 1
+    fi
+
+    command -v "$binary"
 }
 
 install_build_dependencies
@@ -65,7 +80,8 @@ git clone --depth 1 "$REPO" "$DEST"
 
 ZIG_VERSION=$(required_zig_version)
 echo ">>> ghostty requires zig ${ZIG_VERSION}."
-ensure_zig "$ZIG_VERSION"
+ZIG=$(resolve_zig "$ZIG_VERSION")
+echo ">>> Using ${ZIG}"
 
 cd "$DEST"
 sudo "$ZIG" build -p /usr/local -Doptimize=ReleaseFast

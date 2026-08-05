@@ -5,8 +5,9 @@ set -euo pipefail
 # the Elpaca checkout and install it where Emacs looks for it.
 #
 # ghostel pins an exact Zig version in build.zig.zon and refuses to compile
-# with anything else, so the required toolchain is installed via install_zig
-# before building.
+# with anything else, so the toolchain is resolved by version rather than by
+# whatever owns the bare `zig` name. The versioned wrappers come from Home
+# Manager (nix/hosts/asterix.nix).
 #
 # Usage:
 #   build_ghostel                 # build from the Elpaca checkout
@@ -14,8 +15,6 @@ set -euo pipefail
 
 EMACS_DIR=${EMACS_DIR:-$HOME/.emacs.d}
 DEST_DIR=${GHOSTEL_MODULE_DIR:-$EMACS_DIR/var/ghostel}
-ZIG=/usr/local/bin/zig
-SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 case "$(uname -s)" in
     Darwin) MODULE=ghostel-module.dylib ;;
@@ -54,15 +53,28 @@ required_zig_version() {
     echo "$version"
 }
 
-ensure_zig() {
+resolve_zig() {
+    # Home Manager installs one wrapper per Zig minor series (zig-0.15,
+    # zig-0.16, ...), so consumers that pin different versions can coexist.
     local version="$1"
-    echo ">>> Ensuring zig ${version} via install_zig..."
-    "${SCRIPT_DIR}/install_zig" "$version"
+    local series="${version%.*}"
+    local binary="zig-${series}"
 
-    if [[ ! -x "${ZIG}" ]]; then
-        echo "ERROR: zig not found at ${ZIG} after install_zig ran." >&2
+    if ! command -v "$binary" >/dev/null; then
+        echo "ERROR: ${binary} not found on PATH." >&2
+        echo "       Add pkgs.zig_${series//./_} to nix/hosts/\$(hostname -s).nix" >&2
+        echo "       in home_config and run home-manager switch." >&2
         exit 1
     fi
+
+    local found
+    found=$("$binary" version)
+    if [[ "$found" != "$version" ]]; then
+        echo "ERROR: ${binary} reports ${found}, but ${version} is required." >&2
+        exit 1
+    fi
+
+    command -v "$binary"
 }
 
 if ! SRC=$(find_source_dir); then
@@ -74,7 +86,8 @@ echo ">>> ghostel source: ${SRC}"
 
 ZIG_VERSION=$(required_zig_version "$SRC")
 echo ">>> ghostel requires zig ${ZIG_VERSION}."
-ensure_zig "$ZIG_VERSION"
+ZIG=$(resolve_zig "$ZIG_VERSION")
+echo ">>> Using ${ZIG}"
 
 BUILD_DIR=$(mktemp -d)
 trap 'rm -rf "$BUILD_DIR"' EXIT
