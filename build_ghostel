@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Build ghostel's native module (the compiled libghostty shared object) from
+# the Elpaca checkout and install it where Emacs looks for it.
+#
+# ghostel pins an exact Zig version in build.zig.zon and refuses to compile
+# with anything else, so the required toolchain is installed via install_zig
+# before building.
+#
+# Usage:
+#   build_ghostel                 # build from the Elpaca checkout
+#   GHOSTEL_SRC=/path build_ghostel
+
+EMACS_DIR=${EMACS_DIR:-$HOME/.emacs.d}
+DEST_DIR=${GHOSTEL_MODULE_DIR:-$EMACS_DIR/var/ghostel}
+ZIG=/usr/local/bin/zig
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+
+case "$(uname -s)" in
+    Darwin) MODULE=ghostel-module.dylib ;;
+    *)      MODULE=ghostel-module.so ;;
+esac
+SIDECAR=ghostel-module.version
+
+find_source_dir() {
+    # Elpaca renamed repos/ to sources/ at some point; accept either.
+    if [[ -n "${GHOSTEL_SRC:-}" ]]; then
+        echo "$GHOSTEL_SRC"
+        return 0
+    fi
+    local candidate
+    for candidate in "$EMACS_DIR/elpaca/sources/ghostel" \
+                     "$EMACS_DIR/elpaca/repos/ghostel"; do
+        if [[ -f "$candidate/build.zig.zon" ]]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+required_zig_version() {
+    # ghostel's build.zig enforces this version exactly, not as a floor.
+    local zon="$1/build.zig.zon"
+    local version
+    version=$(grep -E 'minimum_zig_version' "$zon" \
+        | head -n1 \
+        | sed -E 's/.*"([^"]+)".*/\1/')
+    if [[ -z "$version" ]]; then
+        echo "ERROR: could not parse minimum_zig_version from ${zon}." >&2
+        exit 1
+    fi
+    echo "$version"
+}
+
+ensure_zig() {
+    local version="$1"
+    echo ">>> Ensuring zig ${version} via install_zig..."
+    "${SCRIPT_DIR}/install_zig" "$version"
+
+    if [[ ! -x "${ZIG}" ]]; then
+        echo "ERROR: zig not found at ${ZIG} after install_zig ran." >&2
+        exit 1
+    fi
+}
+
+if ! SRC=$(find_source_dir); then
+    echo "ERROR: no ghostel checkout found under ${EMACS_DIR}/elpaca." >&2
+    echo "       Start Emacs once to let Elpaca clone it, or set GHOSTEL_SRC." >&2
+    exit 1
+fi
+echo ">>> ghostel source: ${SRC}"
+
+ZIG_VERSION=$(required_zig_version "$SRC")
+echo ">>> ghostel requires zig ${ZIG_VERSION}."
+ensure_zig "$ZIG_VERSION"
+
+BUILD_DIR=$(mktemp -d)
+trap 'rm -rf "$BUILD_DIR"' EXIT
+
+echo ">>> Building ${MODULE}..."
+(cd "$SRC" && "$ZIG" build --prefix "$BUILD_DIR" -Doptimize=ReleaseFast -Dcpu=baseline)
+
+if [[ ! -f "${BUILD_DIR}/${MODULE}" ]]; then
+    echo "ERROR: zig build did not produce ${BUILD_DIR}/${MODULE}." >&2
+    exit 1
+fi
+
+# Install by rename so a running Emacs that already mapped the old module
+# keeps its open inode instead of seeing a half-written file.
+mkdir -p "$DEST_DIR"
+mv -f "${BUILD_DIR}/${MODULE}" "${DEST_DIR}/${MODULE}"
+if [[ -f "${BUILD_DIR}/${SIDECAR}" ]]; then
+    mv -f "${BUILD_DIR}/${SIDECAR}" "${DEST_DIR}/${SIDECAR}"
+fi
+
+echo ">>> Installed ${DEST_DIR}/${MODULE} (version $(cat "${DEST_DIR}/${SIDECAR}" 2>/dev/null || echo unknown))"
+echo ">>> Restart Emacs to load it."
