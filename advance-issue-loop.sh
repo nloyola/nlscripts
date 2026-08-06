@@ -428,6 +428,7 @@ unchecked() {
 #
 #   - [ ] **Step 7 - Cutover** (gated on Step 4)
 #   - [ ] **Step 7 - Cutover** (gated on #12)
+#   - [ ] **Step 7 - Cutover** (gated on #12, step 4)
 #
 # advance-issue-step resolves these before it implements; the loop resolves them
 # again before spending a session, because the two checks cover different holes.
@@ -436,10 +437,19 @@ unchecked() {
 # at it. Checking here also stops a blocked run without burning a session to
 # discover it.
 #
+# A step number is read in the order it was written: one that follows an issue
+# reference in the same gate belongs to that issue, one that does not belongs to
+# this issue. So "#12, step 4" asks after step 4 of #12, not step 4 here - which
+# is how a gate on another issue's step used to block a run forever, the local
+# step it appeared to name being the very step about to run.
+#
+# Naming a step narrows the gate to that step, so the issue holding it need not
+# be closed. A bare issue reference is still met only once that issue closes.
+#
 # Prints the unmet gates and returns 1; returns 0 when the next step is clear or
 # carries no gate at all.
 unmet_gates() {
-  local body step gates n ref unmet=""
+  local body step gates unmet=""
 
   body=$(gh issue view "$issue" --json body -q .body)
   step=$(printf '%s\n' "$body" | grep -m1 '^- \[ \]')
@@ -448,20 +458,49 @@ unmet_gates() {
   gates=$(printf '%s\n' "$step" | grep -oiE '\(gated on [^)]*\)')
   [ -n "$gates" ] || return 0
 
-  # A gate on another step of this issue is met once that step is ticked. The
-  # trailing [^0-9] keeps "Step 1" from matching "Step 10".
-  while read -r n; do
-    [ -n "$n" ] || continue
-    printf '%s\n' "$body" | grep -qiE "^- \[[xX]\] \*\*Step ${n}[^0-9]" ||
-      unmet="${unmet:+$unmet; }Step $n is not ticked"
-  done < <(printf '%s\n' "$gates" | grep -oiE 'step +[0-9]+' | grep -oE '[0-9]+')
+  # One gate at a time, so the issue a step is read against cannot leak out of
+  # the gate that named it.
+  local gate
+  while IFS= read -r gate; do
+    [ -n "$gate" ] || continue
 
-  # A gate on another issue is met only once that issue is closed.
-  while read -r ref; do
-    [ -n "$ref" ] || continue
-    [ "$(gh issue view "$ref" --json state -q .state 2>/dev/null)" = "CLOSED" ] ||
-      unmet="${unmet:+$unmet; }#$ref is not closed"
-  done < <(printf '%s\n' "$gates" | grep -oE '#[0-9]+' | tr -d '#')
+    local -a refs=()
+    local tok
+    while IFS= read -r tok; do refs+=("$tok"); done < <(
+      printf '%s\n' "$gate" | grep -oiE '#[0-9]+|step +[0-9]+'
+    )
+
+    local i next ctx="" n
+    for ((i = 0; i < ${#refs[@]}; i++)); do
+      tok=${refs[i]}
+      next=${refs[i + 1]:-}
+
+      if [ "${tok:0:1}" = '#' ]; then
+        ctx=${tok#\#}
+        # A step named next narrows this gate, and checking it subsumes the
+        # state of the issue as a whole.
+        case $next in
+        [Ss][Tt][Ee][Pp]*) continue ;;
+        esac
+        [ "$(gh issue view "$ctx" --json state -q .state 2>/dev/null)" = "CLOSED" ] ||
+          unmet="${unmet:+$unmet; }#$ctx is not closed"
+        continue
+      fi
+
+      # A gate on a step is met once that step is ticked, in the referenced
+      # issue's body or in this one's. The trailing [^0-9] keeps "Step 1" from
+      # matching "Step 10".
+      n=${tok##* }
+      if [ -n "$ctx" ]; then
+        gh issue view "$ctx" --json body -q .body 2>/dev/null |
+          grep -qiE "^- \[[xX]\] \*\*Step ${n}[^0-9]" ||
+          unmet="${unmet:+$unmet; }#$ctx step $n is not ticked"
+      else
+        printf '%s\n' "$body" | grep -qiE "^- \[[xX]\] \*\*Step ${n}[^0-9]" ||
+          unmet="${unmet:+$unmet; }Step $n is not ticked"
+      fi
+    done
+  done < <(printf '%s\n' "$gates")
 
   [ -n "$unmet" ] || return 0
   printf '%s' "$unmet"
