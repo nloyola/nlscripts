@@ -1,0 +1,111 @@
+#!/bin/sh
+# Emit VPN state as one JSON line for the quickshell VPN chip:
+#
+#   {"up":false,"primary":null,"kind":null,"ip":null,"duration":null,"tunnels":[]}
+#
+# `tunnels` lists every tunnel-like link, plus a FortiClient session when one is
+# up. `up` is true only when a *session* VPN is connected. Tailscale is an
+# always-on mesh, so it is reported with kind "mesh" and never lights the chip
+# on its own - otherwise the indicator would be lit permanently and say nothing.
+#
+# FortiClient creates no interface of its own on this host, so its state comes
+# from `forticlient vpn status` rather than from the link table.
+#
+# Sub-command (the QML calls the script with no arguments):
+#   --parse-forti   parse `forticlient vpn status` from stdin
+#
+# QS_VPN_SYSFS and QS_VPN_FORTI_CMD override the link table and the FortiClient
+# binary so the parsing can be driven from fixtures.
+
+SYSFS=${QS_VPN_SYSFS:-/sys/class/net}
+FORTI=${QS_VPN_FORTI_CMD:-forticlient}
+
+# Print "<name>\t<ip>\t<duration>" when the tunnel is up, nothing otherwise.
+# Keys are stripped by pattern rather than by splitting on ":", so a value that
+# contains colons (Duration is hh:mm:ss) survives intact.
+parse_forti() {
+    awk '
+      function val(s) { sub(/^[[:space:]]*[^:]*:[[:space:]]*/, "", s); return s }
+      /^[[:space:]]*Status:/   { st  = val($0) }
+      /^[[:space:]]*VPN name:/ { nm  = val($0) }
+      /^[[:space:]]*IP:/       { ip  = val($0) }
+      /^[[:space:]]*Duration:/ { dur = val($0) }
+      END { if (st == "Connected") printf "%s\t%s\t%s\n", nm, ip, dur }
+    '
+}
+
+[ "$1" = --parse-forti ] && { parse_forti; exit 0; }
+
+jstr() { printf '"%s"' "$(printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"; }
+jval() { if [ -n "$1" ]; then jstr "$1"; else printf 'null'; fi; }
+
+tunnels=''
+add_tunnel() {  # name kind ip
+    tunnels="$tunnels${tunnels:+,}{\"name\":$(jstr "$1"),\"kind\":$(jstr "$2"),\"ip\":$(jval "$3")}"
+}
+
+up=false
+primary=''
+kind=''
+addr=''
+duration=''
+
+# FortiClient first, so a work VPN wins the primary slot over any other tunnel.
+if command -v "$FORTI" > /dev/null 2>&1; then
+    status=$("$FORTI" vpn status 2>/dev/null | parse_forti)
+    if [ -n "$status" ]; then
+        primary=$(printf '%s' "$status" | cut -f1)
+        addr=$(printf '%s' "$status" | cut -f2)
+        duration=$(printf '%s' "$status" | cut -f3)
+        kind=forticlient
+        up=true
+        add_tunnel "$primary" forticlient "$addr"
+    fi
+fi
+
+for dir in "$SYSFS"/*; do
+    [ -d "$dir" ] || continue
+    name=${dir##*/}
+    case $name in veth* | docker* | br-* | virbr* | lo) continue ;; esac
+    [ -r "$dir/type" ] || continue
+    read -r type < "$dir/type" || continue
+
+    # ARPHRD_NONE covers tun, wireguard and tailscale; ARPHRD_PPP covers ppp.
+    # Everything else (ethernet, bridges, loopback) is not a tunnel.
+    case $type in
+        65534 | 512) ;;
+        *) continue ;;
+    esac
+
+    devtype=''
+    [ -r "$dir/uevent" ] && devtype=$(sed -n 's/^DEVTYPE=//p' "$dir/uevent")
+
+    case $name in
+        tailscale*) link_kind=mesh ;;
+        *)
+            if [ -n "$devtype" ]; then
+                link_kind=$devtype
+            elif [ "$type" = 512 ]; then
+                link_kind=ppp
+            else
+                link_kind=tun
+            fi
+            ;;
+    esac
+
+    link_addr=$(ip -4 -o addr show dev "$name" 2>/dev/null |
+        awk 'NR == 1 { split($4, a, "/"); print a[1] }')
+    add_tunnel "$name" "$link_kind" "$link_addr"
+
+    [ "$link_kind" = mesh ] && continue
+    up=true
+    if [ -z "$primary" ]; then
+        primary=$name
+        kind=$link_kind
+        addr=$link_addr
+    fi
+done
+
+printf '{"up":%s,"primary":%s,"kind":%s,"ip":%s,"duration":%s,"tunnels":[%s]}\n' \
+    "$up" "$(jval "$primary")" "$(jval "$kind")" "$(jval "$addr")" \
+    "$(jval "$duration")" "$tunnels"
