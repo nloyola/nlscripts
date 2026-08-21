@@ -1,0 +1,136 @@
+#!/bin/sh
+# Per-monitor display scaling for the quickshell scale chip.
+#
+#   qs-display-scale list
+#       Emit one JSON line describing every connected, enabled output:
+#
+#         {"outputs":[{"name":"DP-0","primary":true,"mode":"3840x2160",
+#                      "logical":"1920x1080","w":1920,"h":1080,
+#                      "x":0,"y":0,"factor":2.000}]}
+#
+#   qs-display-scale set <output> <factor>
+#       Scale <output> so the desktop is magnified <factor> times, then
+#       re-pack every output left to right so the new framebuffer size does
+#       not leave the outputs overlapping or gapped.
+#
+# `factor` is UI magnification, not xrandr's scale: 2 means everything is
+# twice as big, i.e. a 4K panel renders a 1920x1080 desktop. The framebuffer
+# size is set with `--scale-from` rather than `--scale` so the rounding is
+# ours: non-integer factors (1.333, 3.13) are rounded down to an even pixel
+# count instead of whatever xrandr's own rounding produces.
+#
+# The current factor is derived from xrandr itself (mode width / framebuffer
+# width), so there is no state file and nothing to keep in sync - the chip
+# always reports what the X server is actually doing. Untouched outputs keep
+# their exact current framebuffer size, so repeated `set` calls cannot make a
+# rounded factor drift.
+#
+# Outputs are re-packed horizontally in their current left-to-right order,
+# each keeping its current y. A stacked (vertical) layout is not preserved.
+#
+# QS_DISPLAY_SCALE_QUERY names a file to read instead of running xrandr, and
+# QS_DISPLAY_SCALE_DRY=1 prints the xrandr command instead of running it, so
+# both parsing and layout can be driven from fixtures.
+
+usage() {
+    echo "usage: qs-display-scale list | set <output> <factor>" >&2
+    exit 2
+}
+
+query() {
+    if [ -n "$QS_DISPLAY_SCALE_QUERY" ]; then
+        cat "$QS_DISPLAY_SCALE_QUERY"
+    else
+        xrandr --query 2>/dev/null
+    fi
+}
+
+# Parse `xrandr --query` into one TSV row per connected, enabled output:
+#
+#   name  primary  mode_w  mode_h  fb_w  fb_h  x  y
+#
+# The output line carries the framebuffer geometry ("3840x2160+0+0"); the
+# panel's own resolution is the mode line marked with "*". Connected outputs
+# that are switched off have no geometry and are skipped, as is any output
+# whose current mode xrandr did not report.
+parse() {
+    awk '
+      function emit() {
+          if (name != "" && fbw > 0 && modew > 0)
+              printf "%s\t%s\t%d\t%d\t%d\t%d\t%d\t%d\n",
+                     name, prim, modew, modeh, fbw, fbh, x, y
+          name = ""
+      }
+      /^[^[:space:]]/ {
+          emit()
+          fbw = 0; fbh = 0; x = 0; y = 0; modew = 0; modeh = 0
+          if ($2 != "connected") next
+          name = $1
+          prim = ($3 == "primary") ? "true" : "false"
+          for (i = 3; i <= NF; i++)
+              if ($i ~ /^[0-9]+x[0-9]+\+[0-9]+\+[0-9]+$/) {
+                  split($i, g, /[x+]/)
+                  fbw = g[1]; fbh = g[2]; x = g[3]; y = g[4]
+                  break
+              }
+          next
+      }
+      # First mode line carrying "*" is the current one.
+      name != "" && modew == 0 && /\*/ {
+          split($1, m, "x")
+          modew = m[1]; modeh = m[2]
+      }
+      END { emit() }
+    '
+}
+
+cmd_list() {
+    query | parse | awk '
+      BEGIN { printf "{\"outputs\":[" }
+      {
+          if (n++) printf ","
+          printf "{\"name\":\"%s\",\"primary\":%s,\"mode\":\"%dx%d\",", $1, $2, $3, $4
+          printf "\"logical\":\"%dx%d\",\"w\":%d,\"h\":%d,", $5, $6, $5, $6
+          printf "\"x\":%d,\"y\":%d,\"factor\":%.3f}", $7, $8, $3 / $5
+      }
+      END { printf "]}\n" }
+    '
+}
+
+cmd_set() {
+    target=$1
+    factor=$2
+    [ -n "$target" ] && [ -n "$factor" ] || usage
+
+    case $factor in
+        *[!0-9.]* | '' | .) echo "qs-display-scale: bad factor: $factor" >&2; exit 2 ;;
+    esac
+
+    args=$(query | parse | sort -t "$(printf '\t')" -k7,7n | awk -v target="$target" -v factor="$factor" '
+      function even(v) { v = int(v); if (v % 2) v--; return (v < 2) ? 2 : v }
+      {
+          # Untouched outputs keep their exact framebuffer, so re-packing
+          # never nudges an already-rounded factor.
+          w = $5; h = $6
+          if ($1 == target) { found = 1; w = even($3 / factor); h = even($4 / factor) }
+          printf " --output %s --scale-from %dx%d --pos %dx%d", $1, w, h, x, $8
+          x += w
+      }
+      END { if (!found) exit 3 }
+    ') || { echo "qs-display-scale: no such enabled output: $target" >&2; exit 3; }
+
+    [ -n "$args" ] || { echo "qs-display-scale: no enabled outputs" >&2; exit 3; }
+
+    if [ "$QS_DISPLAY_SCALE_DRY" = 1 ]; then
+        echo "xrandr$args"
+    else
+        # shellcheck disable=SC2086  # args is a built argument list
+        xrandr $args
+    fi
+}
+
+case $1 in
+    list) cmd_list ;;
+    set)  shift; cmd_set "$@" ;;
+    *)    usage ;;
+esac
