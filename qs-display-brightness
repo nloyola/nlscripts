@@ -1,0 +1,157 @@
+#!/bin/sh
+# Per-monitor backlight brightness for the quickshell display chip.
+#
+#   qs-display-brightness list
+#       Emit one JSON line for every enabled output whose monitor answers
+#       DDC/CI:
+#
+#         {"outputs":[{"name":"DP-0","brightness":55}]}
+#
+#       Outputs that do not answer are omitted rather than reported at 0, so
+#       the chip can simply leave the slider out for them.
+#
+#   qs-display-brightness set <output> <percent>
+#       Set that monitor's backlight to <percent> (0-100).
+#
+# This is the real backlight over DDC/CI, not xrandr's --brightness, which
+# only fades the gamma ramp and leaves the panel as bright as it was.
+#
+# MAPPING: ddcutil knows monitors by I2C bus and DRM connector, and on this
+# nvidia setup those names do NOT line up with xrandr's - DP-0 is card0-DP-1.
+# Matching on name would quietly drive the wrong monitor, so the pairing is
+# made on the EDID's binary serial (bytes 12-15, little endian), which xrandr
+# carries in its EDID property and ddcutil prints for every display. It is an
+# exact integer match with nothing to guess at.
+#
+# The bus scan costs about a second, so it is cached for the session and keyed
+# by the set of connected serials: replug or swap a monitor and the key stops
+# matching, so the map is rebuilt rather than pointing at a stale bus. Reading
+# or writing one monitor once mapped is ~0.3s.
+#
+# QS_BRIGHTNESS_XRANDR and QS_BRIGHTNESS_DETECT name files to read instead of
+# running xrandr and ddcutil, QS_BRIGHTNESS_CACHE relocates the cache, and
+# QS_BRIGHTNESS_DRY=1 prints the ddcutil write instead of making it, so the
+# parsing and mapping can be driven from fixtures.
+
+VCP_BRIGHTNESS=10
+
+CACHE=${QS_BRIGHTNESS_CACHE:-${XDG_RUNTIME_DIR:-/tmp}/qs-display-brightness.map}
+
+usage() {
+    echo "usage: qs-display-brightness list | set <output> <percent>" >&2
+    exit 2
+}
+
+# "<output>\t<edid serial>" for every connected, enabled output that has an
+# EDID. The serial is bytes 12-15 of the EDID, little endian - the same number
+# ddcutil reports as "Binary serial number".
+outputs() {
+    if [ -n "$QS_BRIGHTNESS_XRANDR" ]; then cat "$QS_BRIGHTNESS_XRANDR"
+    else xrandr --props 2>/dev/null
+    fi | awk '
+      function hex(c) { return index("0123456789abcdef", c) - 1 }
+      function byte(s, i) { return hex(substr(s, i, 1)) * 16 + hex(substr(s, i + 1, 1)) }
+      function flush() {
+          if (name != "" && enabled && length(edid) >= 32)
+              printf "%s\t%d\n", name,
+                     byte(edid, 25) + byte(edid, 27) * 256 \
+                     + byte(edid, 29) * 65536 + byte(edid, 31) * 16777216
+          name = ""
+      }
+      /^[^[:space:]]/ {
+          flush()
+          enabled = 0; edid = ""; ine = 0
+          if ($2 != "connected") next
+          name = $1
+          for (i = 3; i <= NF; i++)
+              if ($i ~ /^[0-9]+x[0-9]+\+[0-9]+\+[0-9]+$/) { enabled = 1; break }
+          next
+      }
+      name != "" && /^[[:space:]]+EDID:/ { ine = 1; next }
+      ine && /^[[:space:]]+[0-9a-f]+[[:space:]]*$/ { edid = edid $1; next }
+      ine { ine = 0 }
+      END { flush() }
+    '
+}
+
+# "<edid serial>\t<i2c bus>" for every display ddcutil can talk to.
+scan() {
+    if [ -n "$QS_BRIGHTNESS_DETECT" ]; then cat "$QS_BRIGHTNESS_DETECT"
+    else ddcutil detect --verbose 2>/dev/null
+    fi | awk '
+      /I2C bus:/                { bus = $NF; sub(/.*i2c-/, "", bus); next }
+      /Binary serial number:/   { if (bus != "") { printf "%s\t%s\n", $4, bus; bus = "" } }
+    '
+}
+
+# The cache is only trusted while the connected monitors are the same ones.
+cached_map() {
+    key=$(outputs | cut -f2 | sort | tr '\n' ',')
+    [ -n "$key" ] || return 1
+
+    if [ -r "$CACHE" ] && [ "$(head -1 "$CACHE")" = "#$key" ]; then
+        tail -n +2 "$CACHE"
+        return 0
+    fi
+
+    map=$(scan) || return 1
+    { echo "#$key"; echo "$map"; } > "$CACHE" 2>/dev/null
+    echo "$map"
+}
+
+bus_for() {
+    cached_map | awk -v want="$1" '$1 == want { print $2; exit }'
+}
+
+cmd_list() {
+    map=$(cached_map)
+    printf '{"outputs":['
+    first=1
+    outputs | while IFS="$(printf '\t')" read -r name serial; do
+        bus=$(echo "$map" | awk -v want="$serial" '$1 == want { print $2; exit }')
+        [ -n "$bus" ] || continue
+
+        # "VCP 10 C <current> <max>"; max is not always 100.
+        read -r cur max <<VCP
+$(ddcutil -b "$bus" getvcp "$VCP_BRIGHTNESS" --brief 2>/dev/null | awk '{ print $4, $5 }')
+VCP
+        [ -n "$cur" ] && [ -n "$max" ] && [ "$max" -gt 0 ] 2>/dev/null || continue
+
+        [ "$first" = 1 ] || printf ','
+        first=0
+        printf '{"name":"%s","brightness":%d}' "$name" $(( (cur * 100 + max / 2) / max ))
+    done
+    printf ']}\n'
+}
+
+cmd_set() {
+    target=$1
+    percent=$2
+    [ -n "$target" ] && [ -n "$percent" ] || usage
+    case $percent in
+        *[!0-9]* | '') echo "qs-display-brightness: bad percent: $percent" >&2; exit 2 ;;
+    esac
+    [ "$percent" -le 100 ] || { echo "qs-display-brightness: percent out of range: $percent" >&2; exit 2; }
+
+    serial=$(outputs | awk -v want="$target" -F "\t" '$1 == want { print $2; exit }')
+    [ -n "$serial" ] || { echo "qs-display-brightness: no such enabled output: $target" >&2; exit 3; }
+
+    bus=$(bus_for "$serial")
+    [ -n "$bus" ] || { echo "qs-display-brightness: $target does not answer DDC/CI" >&2; exit 3; }
+
+    max=$(ddcutil -b "$bus" getvcp "$VCP_BRIGHTNESS" --brief 2>/dev/null | awk '{ print $5 }')
+    [ -n "$max" ] && [ "$max" -gt 0 ] 2>/dev/null || max=100
+    value=$(( (percent * max + 50) / 100 ))
+
+    if [ "$QS_BRIGHTNESS_DRY" = 1 ]; then
+        echo "ddcutil -b $bus setvcp $VCP_BRIGHTNESS $value"
+    else
+        ddcutil -b "$bus" setvcp "$VCP_BRIGHTNESS" "$value" >/dev/null 2>&1
+    fi
+}
+
+case $1 in
+    list) cmd_list ;;
+    set)  shift; cmd_set "$@" ;;
+    *)    usage ;;
+esac
