@@ -1,17 +1,30 @@
 #!/usr/bin/env bash
+# A different random wallpaper on every monitor, and a pywal palette built from
+# the first one. Run from the session autostart.
+#
+# The dealing lives in qs-wallpaper rather than here: it is the same code path
+# the quickshell display chip uses to set one monitor, so a login and a hand
+# pick agree on which wallpaper is on which output. Doing it with a bare `feh
+# --bg-fill a b` here would leave that record stale and the chip naming files
+# that are no longer on screen.
 export DISPLAY=':0'
 
-dirs=("$HOME/Dropbox/wallpapers" "$HOME/wallpapers")
-files=("${dirs[0]}"/* "${dirs[1]}"/*)
+WALLPAPER="$HOME/.local/bin/qs-wallpaper"
 
-# Two random wallpapers
-wall1="${files[RANDOM % ${#files[@]}]}"
-wall2="${files[RANDOM % ${#files[@]}]}"
+# One "<output>\t<file>" line per monitor; the wallpapers are already on screen
+# by the time this returns.
+dealt=$("$WALLPAPER" random "$HOME/Dropbox/wallpapers" "$HOME/wallpapers") || exit 1
 
-# Set different wallpapers per monitor
-/usr/bin/feh --bg-fill "$wall1" "$wall2"
+# Colours come from the first monitor's wallpaper. -n so wal leaves the
+# background alone: qs-wallpaper has already set it, per monitor, and wal would
+# stretch this one image across both.
+wall1=$(printf '%s\n' "$dealt" | head -1 | cut -f2)
+[ -n "$wall1" ] || exit 0
 
-# Generate colors from the first wallpaper, but don’t reset wallpaper
+# pywal is not installed everywhere this runs. Without the guard the merge
+# below would quietly re-apply a months-old palette from the cache.
+command -v wal >/dev/null || exit 0
+
 wal --backend colorz -n -i "$wall1"
 
 # Apply updated colors
