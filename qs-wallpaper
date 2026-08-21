@@ -1,0 +1,258 @@
+#!/bin/sh
+# Per-monitor wallpaper for the quickshell display chip.
+#
+#   qs-wallpaper list
+#       Emit one JSON line naming the wallpaper on every enabled monitor, in
+#       the order X reports them:
+#
+#         {"mode":"fill","outputs":[{"name":"DP-0","file":"/path/a.jpg","base":"a.jpg"}]}
+#
+#   qs-wallpaper set <output> <file>
+#       Put <file> on <output> and leave every other monitor as it was.
+#
+#   qs-wallpaper pick <output> [dir]
+#       Open feh on [dir] (default ~/Dropbox/wallpapers, recursively) so a
+#       wallpaper can be chosen for <output> by eye: n/p browse, Return sets
+#       the image on show, Escape closes. Browsing starts at that monitor's
+#       current wallpaper when it is still in the directory, and runs through
+#       the subject folders one at a time - feh's "filename" sort is by full
+#       path, where its "name" sort is by basename and interleaves them.
+#
+#   qs-wallpaper random [dir...]
+#       Deal a different random wallpaper to every monitor from [dir...]
+#       (default ~/Dropbox/wallpapers, recursively) and print the
+#       "<output>\t<file>" pairs it settled on. This is what runs at login.
+#
+#   qs-wallpaper restore
+#       Re-apply the remembered wallpapers. ~/.fehbg does the same thing and
+#       is what a session normally runs; this one re-reads the monitor list
+#       first, so it is the one to use after a monitor was added or moved.
+#
+# WHY THE STATE FILE: feh paints the whole root window in one go - there is no
+# "just this screen" call that leaves the rest alone (--xinerama-index blacks
+# the others out). So every set has to name a file for EVERY monitor, which
+# means remembering what is on the ones nobody asked about. That is all the
+# state file holds: one output-to-file line per monitor, in
+# ${XDG_STATE_HOME:-~/.local/state}/qs-wallpaper.
+#
+# It is seeded from ~/.fehbg the first time an output is asked about, so the
+# wallpaper already on screen survives the first set instead of being replaced
+# by black.
+#
+# ORDERING: the file list feh takes is positional - one file per Xinerama
+# screen, in the server's screen order. `xrandr --listmonitors` prints
+# monitors in that same order, so its output is the mapping.
+#
+# ONE FIT MODE: feh's --bg-* flag applies to the whole call, so the fit is a
+# property of the wallpaper set and not of a single monitor. It is stored on
+# the state file's first line, defaults to fill, and QS_WALLPAPER_MODE
+# (fill|scale|max|center|tile) changes it on the next set.
+#
+# QS_WALLPAPER_MONITORS and QS_WALLPAPER_FEHBG name files to read instead of
+# running xrandr and reading ~/.fehbg, QS_WALLPAPER_STATE relocates the state
+# file, and QS_WALLPAPER_DRY=1 prints the feh call instead of making it, so
+# the mapping and seeding can be driven from fixtures.
+
+STATE=${QS_WALLPAPER_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/qs-wallpaper}
+DEFAULT_DIR=${QS_WALLPAPER_DIR:-$HOME/Dropbox/wallpapers}
+TAB=$(printf '\t')
+
+usage() {
+    echo "usage: qs-wallpaper list | set <output> <file> | pick <output> [dir]
+                     | random [dir...] | restore" >&2
+    exit 2
+}
+
+# Enabled monitors, one name per line, in Xinerama screen order.
+monitors() {
+    if [ -n "$QS_WALLPAPER_MONITORS" ]; then cat "$QS_WALLPAPER_MONITORS"
+    else xrandr --listmonitors 2>/dev/null
+    fi | awk '/^ *[0-9]+:/ { print $NF }'
+}
+
+# The fit mode in force: the state file's, unless the environment overrides.
+mode() {
+    if [ -n "$QS_WALLPAPER_MODE" ]; then echo "$QS_WALLPAPER_MODE"; return; fi
+    m=$(awk '$1 == "#mode" { print $2; exit }' "$STATE" 2>/dev/null)
+    echo "${m:-fill}"
+}
+
+stored_for() {
+    awk -F "$TAB" -v want="$1" '$1 == want { print $2; exit }' "$STATE" 2>/dev/null
+}
+
+# The paths ~/.fehbg last put on screen, one per line, in the order feh got
+# them - which is the same monitor order we use. Written by feh itself, so the
+# paths are single-quoted with '\'' for any embedded quote.
+fehbg_files() {
+    fehbg=${QS_WALLPAPER_FEHBG:-$HOME/.fehbg}
+    [ -r "$fehbg" ] || return 0
+    sed -n "s/'\\\\''/\a/g; s/^[^']*'//p" "$fehbg" |
+        awk -v RS="'" 'NR % 2 { gsub(/\a/, "'\''"); print }'
+}
+
+# What is on <output> now: what we remember, else what ~/.fehbg says was in
+# that monitor's slot, else - for a single-file .fehbg, which is one image
+# stretched over every screen - that one image.
+current_for() {
+    file=$(stored_for "$1")
+    if [ -z "$file" ]; then
+        index=$(monitors | awk -v want="$1" '$0 == want { print NR; exit }')
+        [ -n "$index" ] || return 0
+        seeds=$(fehbg_files)
+        count=$(echo "$seeds" | grep -c .)
+        [ "$count" -gt 0 ] || return 0
+        [ "$count" -ge "$index" ] || index=1
+        file=$(echo "$seeds" | sed -n "${index}p")
+    fi
+    echo "$file"
+}
+
+# Replace the state file with the "<output>\t<file>" pairs on stdin, under the
+# mode in force. Written whole and moved into place, so a reader never catches
+# it half-written.
+write_state() {
+    fit=$(mode)
+    tmp=$STATE.$$
+
+    mkdir -p "$(dirname "$STATE")" || exit 1
+    { echo "#mode $fit"; cat; } > "$tmp" || exit 1
+    mv -- "$tmp" "$STATE"
+}
+
+# Write the state file back with <output> set to <file>, keeping every other
+# monitor's line and the mode.
+remember() {
+    target=$1
+    file=$2
+
+    monitors | while IFS= read -r name; do
+        if [ "$name" = "$target" ]; then value=$file
+        else value=$(current_for "$name")
+        fi
+        [ -n "$value" ] && printf '%s\t%s\n' "$name" "$value"
+    done | write_state
+}
+
+# One feh call naming a file for every monitor. Monitors we know nothing about
+# would leave feh a short list and shift every later screen, so they borrow the
+# first known file rather than going black.
+apply() {
+    fit=$(mode)
+    known=""
+    set --
+    for name in $(monitors); do
+        file=$(current_for "$name")
+        [ -n "$file" ] || file=$known
+        [ -n "$known" ] || known=$file
+        [ -n "$file" ] || continue
+        set -- "$@" "$file"
+    done
+    [ $# -gt 0 ] || { echo "qs-wallpaper: no wallpaper to apply" >&2; exit 3; }
+
+    # No --no-fehbg on purpose: letting feh write ~/.fehbg keeps the ordinary
+    # session restore working, and now it holds the full per-monitor list.
+    if [ "$QS_WALLPAPER_DRY" = 1 ]; then
+        echo "feh --bg-$fit $*"
+    else
+        feh "--bg-$fit" "$@"
+    fi
+}
+
+cmd_list() {
+    printf '{"mode":"%s","outputs":[' "$(mode)"
+    first=1
+    for name in $(monitors); do
+        file=$(current_for "$name")
+        [ "$first" = 1 ] || printf ','
+        first=0
+        # Only the characters JSON must not carry raw; paths are otherwise
+        # passed through as they are.
+        esc=$(printf '%s' "$file" | sed 's/\\/\\\\/g; s/"/\\"/g')
+        printf '{"name":"%s","file":"%s","base":"%s"}' \
+               "$name" "$esc" "$(basename "$esc")"
+    done
+    printf ']}\n'
+}
+
+cmd_set() {
+    target=$1
+    file=$2
+    [ -n "$target" ] && [ -n "$file" ] || usage
+    monitors | grep -qx -- "$target" || {
+        echo "qs-wallpaper: no such enabled monitor: $target" >&2; exit 3; }
+    [ -r "$file" ] || { echo "qs-wallpaper: cannot read: $file" >&2; exit 3; }
+
+    case $file in /*) ;; *) file=$(cd "$(dirname "$file")" && pwd)/$(basename "$file") ;; esac
+
+    remember "$target" "$file"
+    apply
+}
+
+cmd_random() {
+    [ $# -gt 0 ] || set -- "$DEFAULT_DIR"
+    for dir in "$@"; do
+        [ -d "$dir" ] || { echo "qs-wallpaper: no such directory: $dir" >&2; exit 3; }
+    done
+
+    names=$(monitors)
+    count=$(echo "$names" | grep -c .)
+    [ "$count" -gt 0 ] || { echo "qs-wallpaper: no monitors" >&2; exit 3; }
+
+    # Shuffled once and dealt out, so two monitors never draw the same image -
+    # unless there are fewer wallpapers than monitors, where the deal wraps.
+    pool=$(find "$@" -type f \
+           \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' \) \
+           2>/dev/null | shuf)
+    total=$(echo "$pool" | grep -c .)
+    [ "$total" -gt 0 ] || { echo "qs-wallpaper: no wallpapers under $*" >&2; exit 3; }
+
+    pairs=$(echo "$names" | awk -v pool="$pool" -v total="$total" '
+        BEGIN { n = split(pool, file, "\n") }
+        { printf "%s\t%s\n", $0, file[(NR - 1) % total + 1] }
+    ')
+
+    echo "$pairs" | write_state
+    apply
+    echo "$pairs"
+}
+
+cmd_pick() {
+    target=$1
+    dir=${2:-$DEFAULT_DIR}
+    [ -n "$target" ] || usage
+    monitors | grep -qx -- "$target" || {
+        echo "qs-wallpaper: no such enabled monitor: $target" >&2; exit 3; }
+    [ -d "$dir" ] || { echo "qs-wallpaper: no such directory: $dir" >&2; exit 3; }
+
+    # feh runs the action through /bin/sh with whatever PATH it inherited, and
+    # the bar's environment need not have ~/.local/bin on it - so hand the
+    # action this script by its own absolute path.
+    self=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
+
+    set -- -r --sort filename --scale-down --auto-zoom --draw-actions \
+           --title "wallpaper: $target" \
+           --action ";[Set on $target]$self set $target %F"
+
+    # Start where this monitor already is, when that file is still in the
+    # directory being browsed - otherwise feh would refuse to start at all.
+    current=$(current_for "$target")
+    case $current in
+        "$dir"/*) [ -r "$current" ] && set -- "$@" --start-at "$current" ;;
+    esac
+
+    if [ "$QS_WALLPAPER_DRY" = 1 ]; then
+        echo "feh $* $dir"
+    else
+        exec feh "$@" "$dir"
+    fi
+}
+
+case $1 in
+    list)    cmd_list ;;
+    set)     shift; cmd_set "$@" ;;
+    pick)    shift; cmd_pick "$@" ;;
+    random)  shift; cmd_random "$@" ;;
+    restore) apply ;;
+    *)       usage ;;
+esac
