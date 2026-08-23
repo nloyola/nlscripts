@@ -1,0 +1,129 @@
+#!/bin/sh
+# Emit the state of the default-route interface as one JSON line for the
+# quickshell network panel:
+#
+#   {"dev":"br0","state":"up","speed":1000,"duplex":null,"mtu":1500,
+#    "mac":"...","ip":"192.168.50.3","gateway":"192.168.50.1",
+#    "dns":["192.168.50.2","192.168.50.1"],
+#    "rxTotal":123,"txTotal":456,"ping":3.1,"loss":0}
+#
+# The interface is whatever currently carries traffic to the internet rather
+# than a hard-coded name: on this host that is normally the br0 bridge, but a
+# FortiClient tunnel or a different machine's wifi has to be reported just as
+# correctly, and `ip route get` is the only thing that stays right through all
+# of them.
+#
+# `ping` and `loss` come from three probes of the gateway, so they measure the
+# first hop and never depend on a public host being reachable. Both are null
+# when there is no gateway or the probes all fail; the panel shows "--".
+#
+# Sub-command:
+#   --speedtest   run a speedtest.net measurement through speedtest-go and emit
+#                 {"down":<Mbps>,"up":<Mbps>,"ping":<ms>,"server":"..."} - or
+#                 {"error":"..."} when the run fails. Kept behind a flag because
+#                 it saturates the link for ~30s and must only ever happen when
+#                 the panel's Run button asks for it.
+#
+# QS_NET_SYSFS overrides the link table so the parsing can be driven from
+# fixtures.
+
+SYSFS=${QS_NET_SYSFS:-/sys/class/net}
+
+jstr() { printf '"%s"' "$(printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"; }
+jval() { if [ -n "$1" ]; then jstr "$1"; else printf 'null'; fi; }
+# Numbers reach QML as JSON numbers, not strings, so the QML never parses text.
+# Anything non-numeric (sysfs prints "unknown" for a bridge's duplex, and -1 for
+# the speed of a link that has no notion of one) becomes null.
+jnum() {
+    case "$1" in
+        '' | *[!0-9.-]* | -* ) printf 'null' ;;
+        * ) printf '%s' "$1" ;;
+    esac
+}
+
+# speedtest-go reports throughput in bytes/s and latency in nanoseconds, both of
+# which are converted here so the panel can print what it is given. Only the
+# first server's result is read: without --multi there is exactly one.
+speedtest() {
+    out=$(speedtest-go --json 2>&1) || {
+        printf '{"error":%s}\n' "$(jstr "$(printf '%s' "$out" | tail -1)")"
+        return
+    }
+    printf '%s' "$out" | awk '
+      function num(key,   s) {
+        if (match($0, "\"" key "\"[[:space:]]*:[[:space:]]*-?[0-9.e+]+")) {
+          s = substr($0, RSTART, RLENGTH)
+          sub(/^.*:[[:space:]]*/, "", s)
+          return s + 0
+        }
+        return ""
+      }
+      function str(key,   s) {
+        if (match($0, "\"" key "\"[[:space:]]*:[[:space:]]*\"[^\"]*\"")) {
+          s = substr($0, RSTART, RLENGTH)
+          sub(/^.*:[[:space:]]*"/, "", s)
+          sub(/"$/, "", s)
+          return s
+        }
+        return ""
+      }
+      {
+        dl = num("dl_speed"); ul = num("ul_speed"); lat = num("latency")
+        sponsor = str("sponsor"); city = str("name")
+      }
+      END {
+        if (dl == "" || ul == "") { print "{\"error\":\"no result\"}"; exit }
+        server = sponsor (city == "" ? "" : (sponsor == "" ? "" : " - ") city)
+        printf "{\"down\":%.1f,\"up\":%.1f,\"ping\":%s,\"server\":\"%s\"}\n", \
+          dl * 8 / 1000000, ul * 8 / 1000000, \
+          (lat == "" ? "null" : sprintf("%.0f", lat / 1000000)), server
+      }
+    '
+}
+
+[ "$1" = --speedtest ] && { speedtest; exit 0; }
+
+# One `ip route get` carries the device, the source address and the gateway.
+# 1.1.1.1 is only a routing target here - nothing is sent to it.
+route=$(ip -o route get 1.1.1.1 2>/dev/null | head -1)
+dev=$(printf '%s' "$route" | sed -n 's/.*[[:space:]]dev[[:space:]]\([^[:space:]]*\).*/\1/p')
+ip=$(printf '%s' "$route" | sed -n 's/.*[[:space:]]src[[:space:]]\([^[:space:]]*\).*/\1/p')
+gateway=$(printf '%s' "$route" | sed -n 's/.*[[:space:]]via[[:space:]]\([^[:space:]]*\).*/\1/p')
+
+read_attr() { [ -r "$SYSFS/$dev/$1" ] && cat "$SYSFS/$dev/$1" 2>/dev/null; }
+
+state=$(read_attr operstate)
+speed=$(read_attr speed)
+duplex=$(read_attr duplex)
+mtu=$(read_attr mtu)
+mac=$(read_attr address)
+rx=$(read_attr statistics/rx_bytes)
+tx=$(read_attr statistics/tx_bytes)
+
+# Per-link servers, not the 127.0.0.53 stub that /etc/resolv.conf advertises
+# under systemd-resolved. Falls back to resolv.conf on hosts without resolved.
+dns=''
+if [ -n "$dev" ] && command -v resolvectl >/dev/null 2>&1; then
+    servers=$(resolvectl dns "$dev" 2>/dev/null | sed -n 's/^Link [0-9]* ([^)]*):[[:space:]]*//p')
+fi
+[ -n "$servers" ] || servers=$(awk '$1 == "nameserver" && $2 != "127.0.0.53" { print $2 }' /etc/resolv.conf 2>/dev/null)
+for s in $servers; do
+    dns="$dns${dns:+,}$(jstr "$s")"
+done
+
+# Three probes, hard-capped at 3s in total so a dead gateway cannot stall the
+# panel's refresh. `ping` reports loss even when every probe is lost, so the
+# loss figure survives what the rtt line does not.
+ping_ms=''
+loss=''
+if [ -n "$gateway" ]; then
+    pout=$(ping -n -q -c 3 -w 3 "$gateway" 2>/dev/null)
+    loss=$(printf '%s' "$pout" | sed -n 's/.*[[:space:]]\([0-9][0-9]*\)% packet loss.*/\1/p')
+    ping_ms=$(printf '%s' "$pout" | sed -n 's|^rtt [^=]*= [0-9.]*/\([0-9.]*\)/.*|\1|p')
+fi
+
+printf '{"dev":%s,"state":%s,"speed":%s,"duplex":%s,"mtu":%s,"mac":%s,"ip":%s,"gateway":%s,"dns":[%s],"rxTotal":%s,"txTotal":%s,"ping":%s,"loss":%s}\n' \
+    "$(jval "$dev")" "$(jval "$state")" "$(jnum "$speed")" \
+    "$(if [ "$duplex" = unknown ]; then printf 'null'; else jval "$duplex"; fi)" \
+    "$(jnum "$mtu")" "$(jval "$mac")" "$(jval "$ip")" "$(jval "$gateway")" \
+    "$dns" "$(jnum "$rx")" "$(jnum "$tx")" "$(jnum "$ping_ms")" "$(jnum "$loss")"
