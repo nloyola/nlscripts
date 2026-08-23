@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Build alacritty from source and install it to ~/bin.
+#
+# Why this exists rather than pkgs.alacritty in the Home Manager flake: the
+# nixpkgs build links nixpkgs' Mesa, which mismatches the system GL drivers on
+# a non-NixOS host, and every window dies at startup with
+#
+#     Error: "failed to find suitable GL configuration."
+#
+# (re-verified 2026-08-23 against nixpkgs alacritty 0.17.0). Building here
+# against the distro's own GL/fontconfig/xcb libraries avoids that entirely,
+# and unlike the apt package (trixie ships 0.15.1) it tracks upstream's latest
+# release.
+#
+# The compiler comes from the nix profile - nix/rust-toolchain.nix puts rustc
+# and cargo on PATH. rustup is deliberately NOT used on these hosts any more.
+
+DEST=$HOME/src/github/tools/alacritty
+REPO=https://github.com/alacritty/alacritty
+BINDIR=$HOME/bin
+
+install_build_dependencies() {
+    echo ">>> Updating apt package metadata..."
+    sudo apt update
+
+    # Per alacritty's INSTALL.md for Debian/Ubuntu. These are the system
+    # libraries the build links against - the whole point of building here
+    # instead of taking the nixpkgs binary.
+    echo ">>> Installing build dependencies..."
+    sudo apt install -y \
+        git \
+        cmake \
+        pkg-config \
+        libfreetype6-dev \
+        libfontconfig1-dev \
+        libxcb-xfixes0-dev \
+        libxkbcommon-dev \
+        python3
+}
+
+resolve_cargo() {
+    if ! command -v cargo >/dev/null; then
+        echo "ERROR: cargo not found on PATH." >&2
+        echo "       Add ../rust-toolchain.nix to the imports in" >&2
+        echo "       home_config/nix/hosts/\$(hostname -s).nix and run hm-switch." >&2
+        exit 1
+    fi
+    command -v cargo
+}
+
+latest_release_tag() {
+    # Newest annotated release tag, release candidates excluded.
+    git -C "$DEST" tag --list 'v*' --sort=-v:refname \
+        | grep -vE -- '-rc[0-9]+$' \
+        | head -n1
+}
+
+install_build_dependencies
+
+CARGO=$(resolve_cargo)
+echo ">>> Using $CARGO ($("$CARGO" --version))"
+
+if [[ -d "${DEST}.old" ]]; then
+    rm -rf "${DEST}.old"
+fi
+
+if [[ -d "${DEST}" ]]; then
+    mv "$DEST" "${DEST}.old"
+fi
+
+# Full clone, not --depth 1: the tag list below is how the release is chosen.
+git clone "$REPO" "$DEST"
+cd "$DEST"
+
+TAG=$(latest_release_tag)
+if [[ -z "$TAG" ]]; then
+    echo "ERROR: could not determine the latest alacritty release tag." >&2
+    exit 1
+fi
+echo ">>> Building alacritty ${TAG}"
+git checkout --quiet "$TAG"
+
+cargo build --release
+
+mkdir -p "$BINDIR"
+install -m 0755 target/release/alacritty "$BINDIR/alacritty"
+
+# Terminfo into the user's own database, so no sudo and no system-wide state.
+# The tracked alacritty.toml sets TERM=xterm-256color, so this is only for the
+# times you want the real entry.
+tic -xe alacritty,alacritty-direct -o "$HOME/.terminfo" extra/alacritty.info
+
+echo ">>> Installed $("$BINDIR/alacritty" --version) to $BINDIR/alacritty"
+echo ">>> ~/.local/bin/alacritty (the nlscripts wrapper) points here."

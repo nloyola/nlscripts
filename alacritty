@@ -23,7 +23,7 @@ MAX_DARK_LUMA=120
 EXCLUDED_THEMES="falcon.toml high_contrast.toml"
 
 # Locate the real alacritty binary
-REAL_ALACRITTY="$HOME/.cargo/bin/alacritty"
+REAL_ALACRITTY="$HOME/bin/alacritty"
 if [ ! -x "$REAL_ALACRITTY" ]; then
     REAL_ALACRITTY=$(PATH=$(echo "$PATH" | sed -e "s|$HOME/.local/bin||g" -e 's|::|:|g') which alacritty)
 fi
