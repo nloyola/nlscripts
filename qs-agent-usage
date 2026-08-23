@@ -1,0 +1,437 @@
+#!/usr/bin/env python3
+"""Usage statistics for the quickshell agent chip: Claude Code and Codex.
+
+Emits one JSON document on stdout:
+
+    {"claude": {...}, "codex": {...}}
+
+Each account has the same shape, so the QML side renders both tabs with one
+component tree:
+
+    {"plan":    "MAX 5X",              # subtitle under the account name
+     "limits":  [{label, percent, resets_at, severity}],
+     "byDay":   [{weekday, date, tokens}],
+     "byModel": [{name, tokens}],
+     "error":   null}                  # non-null replaces the tab body
+
+Prints a well-formed document on every failure path so the bar degrades to an
+empty card instead of blanking, matching qs-weather's contract.
+
+WHY A CACHE: a cold parse of one week of Claude transcripts is ~180MB across
+~110 files and takes ~6s - far too slow to run when the popup opens. Transcripts
+are append-only, so the cache stores a byte offset per file and each run reads
+only what was appended. Steady-state cost is milliseconds.
+
+WHY DEDUP: assistant turns are recorded more than once (streaming re-emits, and
+resumed sessions copy history into the new transcript). On this machine 41% of
+usage records were duplicates - counting them all inflates every total by ~1.7x.
+Records are keyed on (message id, request id) and counted once globally, which
+is why the cache keeps per-file record lists rather than pre-summed totals.
+"""
+
+import datetime
+import json
+import os
+import sys
+import time
+import urllib.request
+
+HOME = os.path.expanduser("~")
+CACHE_PATH = os.path.join(
+    os.environ.get("XDG_CACHE_HOME", os.path.join(HOME, ".cache")),
+    "quickshell", "agent-usage.json",
+)
+CACHE_VERSION = 1
+
+# Rows in the TOKENS BY DAY table, today included.
+WINDOW_DAYS = 7
+# Files older than this are never opened. One day of slack over the window so a
+# session that started before midnight and is still being appended to is caught.
+SCAN_DAYS = WINDOW_DAYS + 1
+# Claude's limits come from the network; don't re-ask on every popup open.
+LIMITS_TTL_S = 60
+# Codex limits are only as fresh as its newest transcript. Past this age the
+# percentages describe a window that has long since reset, so they are dropped
+# rather than shown as current.
+CODEX_LIMITS_MAX_AGE_S = 24 * 3600
+
+
+# ── Cache ────────────────────────────────────────────────────────────────────
+
+def load_cache():
+    try:
+        with open(CACHE_PATH) as fh:
+            cache = json.load(fh)
+        if cache.get("version") == CACHE_VERSION:
+            return cache
+    except Exception:
+        pass
+    return {"version": CACHE_VERSION, "files": {}, "limits": {}}
+
+
+def save_cache(cache):
+    # Drop files that have aged out of the scan window, otherwise the cache
+    # grows without bound across months of transcripts.
+    cutoff = time.time() - SCAN_DAYS * 86400
+    cache["files"] = {
+        path: entry for path, entry in cache["files"].items()
+        if entry.get("mtime", 0) >= cutoff
+    }
+    try:
+        os.makedirs(os.path.dirname(CACHE_PATH), exist_ok=True)
+        tmp = CACHE_PATH + ".tmp"
+        with open(tmp, "w") as fh:
+            json.dump(cache, fh)
+        os.replace(tmp, CACHE_PATH)   # atomic: a killed run never leaves a torn cache
+    except Exception:
+        pass
+
+
+def recent_files(root, suffix=".jsonl"):
+    """Transcript paths under root modified inside the scan window."""
+    cutoff = time.time() - SCAN_DAYS * 86400
+    found = []
+    for dirpath, _dirnames, filenames in os.walk(root):
+        for name in filenames:
+            if not name.endswith(suffix):
+                continue
+            path = os.path.join(dirpath, name)
+            try:
+                st = os.stat(path)
+            except OSError:
+                continue
+            if st.st_mtime >= cutoff:
+                found.append((path, st))
+    return found
+
+
+def scan(root, extract, cache):
+    """Incrementally parse transcripts under root, returning deduped records.
+
+    `extract` maps one decoded JSON line to a (key, day, model, tokens) record
+    or None. Records are cached per file so unchanged files cost one stat().
+    """
+    records = {}
+    for path, st in recent_files(root):
+        entry = cache["files"].get(path)
+        # Reparse from the top when the file shrank: it was rotated or rewritten,
+        # so the stored offset points into unrelated bytes.
+        if entry and entry.get("size", 0) <= st.st_size and entry.get("offset") is not None:
+            offset, rows = entry["offset"], list(entry.get("rows", []))
+        else:
+            offset, rows = 0, []
+
+        if offset < st.st_size:
+            try:
+                with open(path, "rb") as fh:
+                    fh.seek(offset)
+                    data = fh.read()
+                # A final partial line means the agent is mid-write; leave it
+                # for the next run rather than parsing a truncated object.
+                consumed = data.rfind(b"\n") + 1
+                for raw in data[:consumed].split(b"\n"):
+                    if not raw:
+                        continue
+                    try:
+                        rec = extract(json.loads(raw.decode("utf-8", "replace")))
+                    except Exception:
+                        continue
+                    if rec:
+                        rows.append(rec)
+                offset += consumed
+            except OSError:
+                continue
+
+        cache["files"][path] = {
+            "size": st.st_size, "mtime": st.st_mtime, "offset": offset, "rows": rows,
+        }
+        for key, day, model, tokens in rows:
+            records[key] = (day, model, tokens)   # dict keyed on id => global dedup
+    return list(records.values())
+
+
+# ── Shaping ──────────────────────────────────────────────────────────────────
+
+def tables(records):
+    """Turn deduped records into the byDay / byModel tables."""
+    today = datetime.date.today()
+    days = [today - datetime.timedelta(days=n) for n in range(WINDOW_DAYS - 1, -1, -1)]
+    wanted = {d.isoformat() for d in days}
+
+    by_day = {d.isoformat(): 0 for d in days}
+    by_model = {}
+    for day, model, tokens in records:
+        if day not in wanted:
+            continue
+        by_day[day] += tokens
+        by_model[model] = by_model.get(model, 0) + tokens
+
+    return (
+        [{"weekday": "Today" if d == today else d.strftime("%a"),
+          "date": d.isoformat(),
+          "tokens": by_day[d.isoformat()]} for d in days],
+        [{"name": name, "tokens": total}
+         for name, total in sorted(by_model.items(), key=lambda kv: -kv[1])],
+    )
+
+
+def claude_model_name(raw):
+    """claude-opus-5 -> Opus 5;  claude-haiku-4-5 -> Haiku 4.5."""
+    parts = raw.replace("claude-", "", 1).split("-")
+    if not parts:
+        return raw
+    version = ".".join(p for p in parts[1:] if p.isdigit())
+    return (parts[0].title() + " " + version).strip()
+
+
+def plan_label(tier, subscription):
+    """default_claude_max_5x -> MAX 5X. Falls back to the subscription type."""
+    tier = (tier or "").replace("default_claude_", "").replace("default_", "")
+    return tier.replace("_", " ").upper() or (subscription or "").upper()
+
+
+def limit_label(entry):
+    kind = entry.get("kind") or ""
+    if kind == "session":
+        return "Session"
+    if kind == "weekly_all":
+        return "Weekly"
+    if kind == "weekly_scoped":
+        scope = (entry.get("scope") or {}).get("model") or {}
+        name = scope.get("display_name")
+        return (name + " Weekly") if name else "Weekly"
+    return kind.replace("_", " ").title() or "Limit"
+
+
+def epoch(iso):
+    """ISO-8601 -> epoch seconds. QML formats the countdown itself, so it stays
+    correct between refreshes instead of freezing at fetch time."""
+    if not iso:
+        return None
+    try:
+        return int(datetime.datetime.fromisoformat(iso).timestamp())
+    except Exception:
+        return None
+
+
+# ── Claude Code ──────────────────────────────────────────────────────────────
+
+def claude_usage_record(obj):
+    message = obj.get("message")
+    if not isinstance(message, dict):
+        return None
+    usage = message.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    model = message.get("model") or ""
+    if not model or model == "<synthetic>":
+        return None
+    total = (usage.get("input_tokens", 0) + usage.get("output_tokens", 0)
+             + usage.get("cache_creation_input_tokens", 0)
+             + usage.get("cache_read_input_tokens", 0))
+    if not total:
+        return None
+    key = "%s/%s" % (message.get("id"), obj.get("requestId"))
+    return key, (obj.get("timestamp") or "")[:10], claude_model_name(model), total
+
+
+def claude_limits(cache):
+    """Session / Weekly / per-model-weekly percentages.
+
+    Claude Code keeps no limit data on disk - the only source is the account's
+    usage endpoint. The bearer token is read here and passed straight to the
+    request; it is never printed and never written to the cache.
+
+    This endpoint is not a documented API, so a Claude Code update can change or
+    remove it. That is why every failure returns an error string for the card to
+    show rather than raising.
+    """
+    cached = cache.get("limits", {}).get("claude")
+    if cached and time.time() - cached.get("fetched_at", 0) < LIMITS_TTL_S:
+        return cached["rows"], cached.get("plan"), cached.get("error")
+
+    rows, plan, error = [], None, None
+    try:
+        with open(os.path.join(HOME, ".claude", ".credentials.json")) as fh:
+            oauth = json.load(fh)["claudeAiOauth"]
+        plan = plan_label(oauth.get("rateLimitTier"), oauth.get("subscriptionType"))
+
+        request = urllib.request.Request(
+            "https://api.anthropic.com/api/oauth/usage",
+            headers={"Authorization": "Bearer " + oauth["accessToken"],
+                     "anthropic-beta": "oauth-2025-04-20",
+                     "User-Agent": "qs-agent-usage"},
+        )
+        with urllib.request.urlopen(request, timeout=10) as response:
+            payload = json.load(response)
+
+        for entry in payload.get("limits") or []:
+            rows.append({"label": limit_label(entry),
+                         "percent": entry.get("percent") or 0,
+                         "resets_at": epoch(entry.get("resets_at")),
+                         "severity": entry.get("severity") or "normal"})
+    except FileNotFoundError:
+        error = "Not signed in"
+    except Exception as exc:
+        error = "Limits unavailable (%s)" % type(exc).__name__
+
+    cache.setdefault("limits", {})["claude"] = {
+        "fetched_at": time.time(), "rows": rows, "plan": plan, "error": error,
+    }
+    return rows, plan, error
+
+
+def claude(cache):
+    root = os.path.join(HOME, ".claude", "projects")
+    if not os.path.isdir(root):
+        return {"plan": None, "limits": [], "byDay": [], "byModel": [],
+                "error": "No transcripts yet"}
+
+    by_day, by_model = tables(scan(root, claude_usage_record, cache))
+    rows, plan, error = claude_limits(cache)
+    return {"plan": plan, "limits": rows, "limitsError": error,
+            "byDay": by_day, "byModel": by_model, "error": None}
+
+
+# ── Codex ────────────────────────────────────────────────────────────────────
+
+def codex_model_name(raw):
+    """gpt-5.4 -> GPT-5.4;  gpt-5.6-terra -> GPT-5.6 Terra."""
+    if not raw.lower().startswith("gpt"):
+        return raw
+    parts = raw.split("-")
+    name = parts[0].upper() + ("-" + parts[1] if len(parts) > 1 else "")
+    return name + ("".join(" " + p.title() for p in parts[2:]))
+
+
+def pi_usage_record(obj):
+    """One assistant turn from a Pi session, counted only if it went to Codex.
+
+    Pi is a multi-provider harness - the same session file can hold anthropic
+    and gemini turns - so the provider tag is what makes this a Codex number
+    rather than a total. Pi also records per-turn cost, which the Claude side
+    has no equivalent for; it is ignored to keep both tabs the same shape.
+    """
+    message = obj.get("message")
+    if not isinstance(message, dict):
+        return None
+    usage = message.get("usage")
+    if not isinstance(usage, dict) or message.get("provider") != "openai-codex":
+        return None
+    total = usage.get("totalTokens") or 0
+    if not total:
+        return None
+    return ("pi:%s" % obj.get("id"), (obj.get("timestamp") or "")[:10],
+            codex_model_name(message.get("model") or ""), total)
+
+
+def codex_cli(cache, records):
+    """Usage from the Codex CLI's own rollouts, appended to `records`.
+
+    Tokens here are not per-message: every token_count event repeats the
+    session's running total. Taking the maximum per session and attributing it
+    to the session's date counts each turn exactly once without needing the
+    dedup pass the other readers require.
+
+    This is also the only source of Codex rate limits anywhere on disk, which is
+    why the reader stays even when all the activity is coming through Pi.
+    """
+    root = os.path.join(HOME, ".codex", "sessions")
+    if not os.path.isdir(root):
+        return [], 0, None
+
+    limits, limits_at, plan = [], 0, None
+    for path, st in recent_files(root):
+        total, model, session_day = 0, "", ""
+        try:
+            with open(path, errors="replace") as fh:
+                for line in fh:
+                    if '"model"' not in line and "token_count" not in line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except Exception:
+                        continue
+                    payload = obj.get("payload") or {}
+                    if not session_day:
+                        session_day = (obj.get("timestamp") or "")[:10]
+                    model = payload.get("model") or model
+
+                    if payload.get("type") != "token_count":
+                        continue
+                    info = payload.get("info") or {}
+                    usage = info.get("total_token_usage") or {}
+                    total = max(total, usage.get("total_tokens", 0))
+
+                    rate = payload.get("rate_limits")
+                    if rate and obj.get("timestamp"):
+                        seen = epoch(obj["timestamp"].replace("Z", "+00:00")) or 0
+                        if seen > limits_at:
+                            limits_at, plan = seen, (rate.get("plan_type") or "").upper()
+                            limits = [
+                                {"label": "Session", "percent": w.get("used_percent") or 0,
+                                 "resets_at": w.get("resets_at"), "severity": "normal"}
+                                if name == "primary" else
+                                {"label": "Weekly", "percent": w.get("used_percent") or 0,
+                                 "resets_at": w.get("resets_at"), "severity": "normal"}
+                                for name in ("primary", "secondary")
+                                for w in [rate.get(name)] if w
+                            ]
+        except OSError:
+            continue
+        if total and session_day:
+            records.append((session_day, codex_model_name(model), total))
+
+    return limits, limits_at, plan
+
+
+def codex(cache):
+    """Codex usage, however it was driven.
+
+    Two harnesses reach the same Codex account and neither knows about the
+    other: the Codex CLI writes rollouts under ~/.codex/sessions, and Pi writes
+    its own sessions under ~/.pi/agent/sessions. Reading only one of them
+    reports zero while the account is plainly busy, so both are merged here.
+
+    Rate limits are a CLI-only signal - Pi's session files carry no window
+    percentages at all - so an account driven entirely through Pi gets accurate
+    token tables and no LIMITS block.
+    """
+    records = []
+    limits, limits_at, plan = codex_cli(cache, records)
+
+    pi_root = os.path.join(HOME, ".pi", "agent", "sessions")
+    if os.path.isdir(pi_root):
+        records += scan(pi_root, pi_usage_record, cache)
+
+    if not records and not limits:
+        return {"plan": None, "limits": [], "byDay": [], "byModel": [],
+                "error": "Codex not installed"}
+
+    by_day, by_model = tables(records)
+    # Percentages describe a 5h/weekly window; once that window has passed they
+    # say nothing about the present, so show nothing rather than something wrong.
+    if limits_at and time.time() - limits_at > CODEX_LIMITS_MAX_AGE_S:
+        limits, plan = [], plan if any(row["tokens"] for row in by_day) else None
+
+    error = None if any(row["tokens"] for row in by_day) else "No recent activity"
+    return {"plan": plan, "limits": limits, "byDay": by_day, "byModel": by_model,
+            "error": error}
+
+
+# ── Entry point ──────────────────────────────────────────────────────────────
+
+def main():
+    cache = load_cache()
+    try:
+        result = {"claude": claude(cache), "codex": codex(cache)}
+    except Exception as exc:
+        result = {"claude": {"error": str(exc), "limits": [], "byDay": [], "byModel": []},
+                  "codex": {"error": str(exc), "limits": [], "byDay": [], "byModel": []}}
+    save_cache(cache)
+    json.dump(result, sys.stdout)
+    sys.stdout.write("\n")
+
+
+if __name__ == "__main__":
+    main()
