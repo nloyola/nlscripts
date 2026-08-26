@@ -27,31 +27,54 @@
 #       Re-apply the remembered wallpapers. ~/.fehbg does the same thing and
 #       is what a session normally runs; this one re-reads the monitor list
 #       first, so it is the one to use after a monitor was added or moved.
+#       X11 only in effect - under Hyprland the shell is already watching both
+#       the state file and its own screen list, so there is nothing to redo.
 #
-# WHY THE STATE FILE: feh paints the whole root window in one go - there is no
-# "just this screen" call that leaves the rest alone (--xinerama-index blacks
-# the others out). So every set has to name a file for EVERY monitor, which
-# means remembering what is on the ones nobody asked about. That is all the
-# state file holds: one output-to-file line per monitor, in
+# TWO SESSIONS, ONE STATE FILE. Who puts the image on screen depends on what
+# is running the desktop:
+#
+#   i3 / X11. This script paints, with one `feh --bg-*` call over the root
+#   window. Everything from WHY THE STATE FILE down is about that path.
+#
+#   Hyprland / Wayland. There is no root window to paint. feh's --bg-* does
+#   not fail here - it draws on XWayland's root, which the compositor never
+#   shows, so a set looked like it worked and nothing changed. The quickshell
+#   bar paints instead: one background-layer surface per monitor, watching
+#   this state file. So writing the file IS the apply and there is nothing to
+#   run. See the wallpaper Variants in ~/.config/quickshell/default/shell.qml.
+#
+# The record is the same file in the same format either way, so a wallpaper
+# picked in one session is still on that monitor after logging into the other.
+#
+# WHY THE STATE FILE: on X11, feh paints the whole root window in one go -
+# there is no "just this screen" call that leaves the rest alone
+# (--xinerama-index blacks the others out). So every set has to name a file for
+# EVERY monitor, which means remembering what is on the ones nobody asked
+# about. Wayland has no such constraint, but the shell needs the same
+# per-monitor record to read. That is all the state file holds: one
+# output-to-file line per monitor, in
 # ${XDG_STATE_HOME:-~/.local/state}/qs-wallpaper.
 #
 # It is seeded from ~/.fehbg the first time an output is asked about, so the
 # wallpaper already on screen survives the first set instead of being replaced
 # by black.
 #
-# ORDERING: the file list feh takes is positional - one file per Xinerama
-# screen, in the server's screen order. `xrandr --listmonitors` prints
-# monitors in that same order, so its output is the mapping.
+# ORDERING (X11): the file list feh takes is positional - one file per
+# Xinerama screen, in the server's screen order. `xrandr --listmonitors` prints
+# monitors in that same order, so its output is the mapping. Nothing on the
+# Wayland side is positional: every surface names its own monitor.
 #
 # ONE FIT MODE: feh's --bg-* flag applies to the whole call, so the fit is a
 # property of the wallpaper set and not of a single monitor. It is stored on
 # the state file's first line, defaults to fill, and QS_WALLPAPER_MODE
-# (fill|scale|max|center|tile) changes it on the next set.
+# (fill|scale|max|center|tile) changes it on the next set. `list` reports it so
+# the shell can pick the matching Image fillMode.
 #
-# QS_WALLPAPER_MONITORS and QS_WALLPAPER_FEHBG name files to read instead of
-# running xrandr and reading ~/.fehbg, QS_WALLPAPER_STATE relocates the state
-# file, and QS_WALLPAPER_DRY=1 prints the feh call instead of making it, so
-# the mapping and seeding can be driven from fixtures.
+# QS_WALLPAPER_MONITORS, QS_WALLPAPER_HYPRCTL and QS_WALLPAPER_FEHBG name files
+# to read instead of running xrandr, running hyprctl and reading ~/.fehbg (the
+# first two also force which session path is taken), QS_WALLPAPER_STATE
+# relocates the state file, and QS_WALLPAPER_DRY=1 prints the feh call instead
+# of making it, so the mapping and seeding can be driven from fixtures.
 
 STATE=${QS_WALLPAPER_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/qs-wallpaper}
 DEFAULT_DIR=${QS_WALLPAPER_DIR:-$HOME/Dropbox/wallpapers}
@@ -63,11 +86,44 @@ usage() {
     exit 2
 }
 
-# Enabled monitors, one name per line, in Xinerama screen order.
-monitors() {
+# Which session is running, and so which of the two paths above to take. The
+# fixture variables force it, the way QS_BRIGHTNESS_* do in
+# qs-display-brightness.
+session() {
+    if   [ -n "$QS_WALLPAPER_HYPRCTL" ];        then echo wayland
+    elif [ -n "$QS_WALLPAPER_MONITORS" ];       then echo x11
+    elif [ -n "$HYPRLAND_INSTANCE_SIGNATURE" ]; then echo wayland
+    else echo x11
+    fi
+}
+SESSION=$(session)
+
+# Enabled monitors, one name per line, in the compositor's own order.
+
+# X11: `--listmonitors` prints only the enabled ones, in Xinerama screen order,
+# which is the order the positional feh call needs.
+xrandr_monitors() {
     if [ -n "$QS_WALLPAPER_MONITORS" ]; then cat "$QS_WALLPAPER_MONITORS"
     else xrandr --listmonitors 2>/dev/null
     fi | awk '/^ *[0-9]+:/ { print $NF }'
+}
+
+# Hyprland: xrandr is unusable here - it reads XWayland, whose outputs need not
+# track the compositor's. `hyprctl monitors` names each output by its DRM
+# connector, and a monitor Hyprland has turned off is not one to deal a
+# wallpaper to, so `disabled: true` drops out.
+hyprctl_monitors() {
+    if [ -n "$QS_WALLPAPER_HYPRCTL" ]; then cat "$QS_WALLPAPER_HYPRCTL"
+    else hyprctl monitors 2>/dev/null
+    fi | awk '
+      /^Monitor /                      { name = $2; next }
+      name != "" && $1 == "disabled:"  { if ($2 == "false") print name
+                                         name = "" }
+    '
+}
+
+monitors() {
+    if [ "$SESSION" = wayland ]; then hyprctl_monitors; else xrandr_monitors; fi
 }
 
 # The fit mode in force: the state file's, unless the environment overrides.
@@ -134,10 +190,19 @@ remember() {
     done | write_state
 }
 
-# One feh call naming a file for every monitor. Monitors we know nothing about
-# would leave feh a short list and shift every later screen, so they borrow the
-# first known file rather than going black.
+# Put the remembered wallpapers on screen.
+#
+# On Wayland this is where the work stops: the shell owns the surfaces and is
+# watching the state file, which the caller has already written. Returning
+# here rather than skipping the call at each site keeps set/random/restore
+# reading the same in both sessions.
+#
+# On X11 it is one feh call naming a file for every monitor. Monitors we know
+# nothing about would leave feh a short list and shift every later screen, so
+# they borrow the first known file rather than going black.
 apply() {
+    [ "$SESSION" = wayland ] && return 0
+
     fit=$(mode)
     known=""
     set --
