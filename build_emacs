@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DEST=$HOME/src/emacs/emacs
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH:-}
 export LD_LIBRARY_PATH=/usr/local/lib/:${LD_LIBRARY_PATH:-}
@@ -31,6 +30,26 @@ default_nox() {
 }
 
 NOX=${EMACS_NOX:-$(default_nox)}
+
+# Set EMACS_PGTK=1 for a pure GTK (Wayland-native) build. It cannot share a
+# prefix with the X11 build - both install the same binary and share/ names - so
+# it goes to its own prefix and is exposed as /usr/local/bin/emacs-pgtk. Run the
+# script once per flavour to refresh both.
+PGTK=${EMACS_PGTK:-0}
+
+if [[ "$NOX" -eq 1 && "$PGTK" -eq 1 ]]; then
+    echo "ERROR: EMACS_NOX and EMACS_PGTK are mutually exclusive." >&2
+    exit 1
+fi
+
+if [[ "$PGTK" -eq 1 ]]; then
+    DEST=$HOME/src/emacs/emacs-pgtk
+    PREFIX=/usr/local/emacs-pgtk
+    echo ">>> Building a pure GTK (Wayland-native) Emacs into $PREFIX."
+else
+    DEST=$HOME/src/emacs/emacs
+    PREFIX=/usr/local
+fi
 
 if [[ "$NOX" -eq 1 ]]; then
     echo ">>> Building a terminal-only (-nw) Emacs: no X11, GTK, or image libraries."
@@ -172,7 +191,7 @@ install_build_dependencies() {
         echo ">>> No tree-sitter runtime package found in apt; will rely on source install."
     fi
 
-    if ! is_wsl && [[ "$NOX" -ne 1 ]]; then
+    if ! is_wsl && [[ "$NOX" -ne 1 && "$PGTK" -ne 1 ]]; then
         if apt_has_package libgconf2-dev; then
             packages+=("libgconf2-dev")
             HAVE_GCONF=1
@@ -329,7 +348,7 @@ ensure_tree_sitter_version
 
 if is_wsl; then
     configure_args=(
-        --prefix=/usr/local
+        --prefix=$PREFIX
         --with-native-compilation=aot
         --with-modules
         --with-harfbuzz
@@ -347,9 +366,28 @@ if is_wsl; then
         --with-xml2
         --with-pgtk
     )
+elif [[ "$PGTK" -eq 1 ]]; then
+    configure_args=(
+        --prefix=$PREFIX
+        --with-pgtk
+        --without-gsettings
+        --with-mailutils
+        --with-harfbuzz
+        --with-native-compilation=aot
+        --with-modules
+        --with-json
+        --with-cairo
+        --with-imagemagick
+        --with-rsvg
+        --with-gif
+        --with-png
+        --with-jpeg
+        --with-tree-sitter
+        --without-compress-install
+    )
 elif [[ "$NOX" -eq 1 ]]; then
     configure_args=(
-        --prefix=/usr/local
+        --prefix=$PREFIX
         --without-x
         --with-mailutils
         --with-native-compilation=aot
@@ -362,7 +400,7 @@ elif [[ "$NOX" -eq 1 ]]; then
     )
 else
     configure_args=(
-        --prefix=/usr/local
+        --prefix=$PREFIX
         --with-x-toolkit=gtk3
         --with-xft
         --without-toolkit-scroll-bars
@@ -413,9 +451,21 @@ cd "$DEST"
 make distclean || true
 ./autogen.sh
 ./configure "${configure_args[@]}" CC=$CC CFLAGS="$CFLAGS_MAD_SCIENTIST"
-assert_configured_features HAVE_SQLITE3 HAVE_TREE_SITTER HAVE_NATIVE_COMP HAVE_MODULES HAVE_GNUTLS
+required_features=(HAVE_SQLITE3 HAVE_TREE_SITTER HAVE_NATIVE_COMP HAVE_MODULES HAVE_GNUTLS)
+if [[ "$PGTK" -eq 1 ]]; then
+    required_features+=(HAVE_PGTK)
+fi
+assert_configured_features "${required_features[@]}"
 make -j"$(nproc)"
 sudo make install
+
+# The pgtk build lives in its own prefix so it cannot clobber the X11 one; give
+# it a stable name on PATH.
+if [[ "$PGTK" -eq 1 ]]; then
+    sudo ln -sfn "$PREFIX/bin/emacs" /usr/local/bin/emacs-pgtk
+    sudo ln -sfn "$PREFIX/bin/emacsclient" /usr/local/bin/emacsclient-pgtk
+    echo ">>> Installed /usr/local/bin/emacs-pgtk -> $PREFIX/bin/emacs"
+fi
 
 # Rebuild ghostel's native module. Not required by the Emacs build itself, but
 # it keeps the module in step with the checkout after a toolchain refresh.
