@@ -16,22 +16,34 @@
 # This is the real backlight over DDC/CI, not xrandr's --brightness, which
 # only fades the gamma ramp and leaves the panel as bright as it was.
 #
-# MAPPING: ddcutil knows monitors by I2C bus and DRM connector, and on this
-# nvidia setup those names do NOT line up with xrandr's - DP-0 is card0-DP-1.
-# Matching on name would quietly drive the wrong monitor, so the pairing is
-# made on the EDID's binary serial (bytes 12-15, little endian), which xrandr
-# carries in its EDID property and ddcutil prints for every display. It is an
-# exact integer match with nothing to guess at.
+# MAPPING: ddcutil knows monitors by I2C bus and DRM connector, and how those
+# line up with the compositor's output names depends on the session:
+#
+#   i3 / X11 (nvidia). xrandr's names do NOT match the DRM connectors - DP-0 is
+#   card0-DP-1. Matching on name would quietly drive the wrong monitor, so the
+#   pairing is made on the EDID's binary serial (bytes 12-15, little endian),
+#   which xrandr carries in its EDID property and ddcutil prints for every
+#   display. It is an exact integer match with nothing to guess at.
+#
+#   Hyprland / Wayland. xrandr is unusable here: it reads XWayland, which
+#   publishes no EDID property at all, so the serial pairing above finds
+#   nothing and every monitor drops out of `list`. Hyprland instead names each
+#   output by its DRM connector, so `hyprctl monitors` gives DP-1 for
+#   card0-DP-1 - an exact match against ddcutil with no EDID needed.
+#
+# So `scan` keys each bus under BOTH its binary serial and its bare DRM
+# connector, and whichever key the session's output list yields resolves.
 #
 # The bus scan costs about a second, so it is cached for the session and keyed
-# by the set of connected serials: replug or swap a monitor and the key stops
-# matching, so the map is rebuilt rather than pointing at a stale bus. Reading
-# or writing one monitor once mapped is ~0.3s.
+# by the set of connected output keys: replug or swap a monitor and the key
+# stops matching, so the map is rebuilt rather than pointing at a stale bus.
+# Reading or writing one monitor once mapped is ~0.3s.
 #
-# QS_BRIGHTNESS_XRANDR and QS_BRIGHTNESS_DETECT name files to read instead of
-# running xrandr and ddcutil, QS_BRIGHTNESS_CACHE relocates the cache, and
-# QS_BRIGHTNESS_DRY=1 prints the ddcutil write instead of making it, so the
-# parsing and mapping can be driven from fixtures.
+# QS_BRIGHTNESS_XRANDR, QS_BRIGHTNESS_HYPRCTL and QS_BRIGHTNESS_DETECT name
+# files to read instead of running xrandr, hyprctl and ddcutil (the first two
+# also force which session path is taken), QS_BRIGHTNESS_CACHE relocates the
+# cache, and QS_BRIGHTNESS_DRY=1 prints the ddcutil write instead of making it,
+# so the parsing and mapping can be driven from fixtures.
 
 VCP_BRIGHTNESS=10
 
@@ -42,10 +54,14 @@ usage() {
     exit 2
 }
 
-# "<output>\t<edid serial>" for every connected, enabled output that has an
-# EDID. The serial is bytes 12-15 of the EDID, little endian - the same number
-# ddcutil reports as "Binary serial number".
-outputs() {
+# "<output>\t<key>" for every connected, enabled output, where <key> is
+# whatever `scan` can be asked for that output's i2c bus by. Two sources, one
+# per session type; see MAPPING above.
+
+# X11: key is the EDID's binary serial - bytes 12-15, little endian, the same
+# number ddcutil reports as "Binary serial number". Outputs with no EDID are
+# skipped, since there is nothing to pair them on.
+xrandr_outputs() {
     if [ -n "$QS_BRIGHTNESS_XRANDR" ]; then cat "$QS_BRIGHTNESS_XRANDR"
     else xrandr --props 2>/dev/null
     fi | awk '
@@ -74,12 +90,41 @@ outputs() {
     '
 }
 
-# "<edid serial>\t<i2c bus>" for every display ddcutil can talk to.
+# Hyprland: key is the output name itself, which IS the DRM connector, so it
+# matches ddcutil directly. A monitor Hyprland has turned off answers DDC/CI
+# but is not something the bar shows a slider for, so `disabled: true` drops
+# out here the same way an unmapped xrandr output does.
+hyprctl_outputs() {
+    if [ -n "$QS_BRIGHTNESS_HYPRCTL" ]; then cat "$QS_BRIGHTNESS_HYPRCTL"
+    else hyprctl monitors 2>/dev/null
+    fi | awk '
+      /^Monitor /                      { name = $2; next }
+      name != "" && $1 == "disabled:"  { if ($2 == "false") printf "%s\t%s\n", name, name
+                                         name = "" }
+    '
+}
+
+outputs() {
+    if [ -n "$QS_BRIGHTNESS_XRANDR" ];   then xrandr_outputs
+    elif [ -n "$QS_BRIGHTNESS_HYPRCTL" ]; then hyprctl_outputs
+    elif [ -n "$HYPRLAND_INSTANCE_SIGNATURE" ]; then hyprctl_outputs
+    else xrandr_outputs
+    fi
+}
+
+# "<key>\t<i2c bus>" for every display ddcutil can talk to, emitted once per
+# key the two output sources can ask by: the bare DRM connector and the binary
+# serial. A connector is never all-digits, so the two key spaces cannot collide.
 scan() {
     if [ -n "$QS_BRIGHTNESS_DETECT" ]; then cat "$QS_BRIGHTNESS_DETECT"
     else ddcutil detect --verbose 2>/dev/null
     fi | awk '
       /I2C bus:/                { bus = $NF; sub(/.*i2c-/, "", bus); next }
+      /DRM connector:/          { if (bus != "") {
+                                      conn = $NF; sub(/^card[0-9]+-/, "", conn)
+                                      printf "%s\t%s\n", conn, bus
+                                  }
+                                  next }
       /Binary serial number:/   { if (bus != "") { printf "%s\t%s\n", $4, bus; bus = "" } }
     '
 }
