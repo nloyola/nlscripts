@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Build quickshell from source with BOTH X11/i3 and Wayland/Hyprland support,
+# and install it to /usr/local.
+#
+# WHY: the binary this replaces was configured with -DWAYLAND=OFF and reported
+# itself as "Local Debian Trixie i3 build", with every Hyprland feature listed
+# as "OFF (Requires WAYLAND)". That was fine while quickshell only ever ran
+# under i3 - the sway session used waybar instead - but the Hyprland session
+# needs the bar, and the bar needs the Wayland and Hyprland modules compiled in.
+#
+# The X11 and I3 features stay ON deliberately. One binary then serves both the
+# i3/X11 session and the Hyprland session, so ~/.config/quickshell/default can
+# import both Quickshell.I3 and Quickshell.Hyprland and choose at runtime. Build
+# it with Wayland only and the i3 bar dies the moment this installs.
+#
+# NOTE: quickshell links private Qt APIs and MUST be rebuilt after every Qt
+# update, or it will crash on an ABI mismatch. If the bar starts crashing after
+# an apt upgrade that touched qt6, re-run this script first.
+
+DEST=$HOME/src/quickshell
+REPO=https://git.outfoxxed.me/quickshell/quickshell
+BUILD_DIR="${DEST}/build"
+PREFIX=/usr/local
+
+install_build_dependencies() {
+    echo ">>> Updating apt package metadata..."
+    sudo apt update
+
+    # Qt here is 6.8.x, which is before the 6.10 release that folded the
+    # wayland bits into qt6declarative, so qt6-wayland and its private headers
+    # are both still required. Everything else in this list was already present
+    # for the previous X11-only build.
+    echo ">>> Installing build dependencies..."
+    sudo apt install -y \
+        cmake \
+        ninja-build \
+        pkg-config \
+        qt6-base-dev \
+        qt6-declarative-dev \
+        qt6-declarative-private-dev \
+        qt6-shadertools-dev \
+        qt6-wayland \
+        qt6-wayland-dev \
+        qt6-wayland-private-dev \
+        libdrm-dev \
+        libwayland-dev \
+        wayland-protocols \
+        libjemalloc-dev \
+        libcli11-dev \
+        libpolkit-agent-1-dev \
+        spirv-tools
+
+    # cpptrace backs quickshell's crash handler, which upstream asks packagers
+    # to leave enabled. Trixie proper has no libcpptrace-dev; backports does
+    # (1.0.4), and that suite is already enabled on this host because Hyprland
+    # itself comes from it - see ansible/host_vars/asterix.yml. Backports is
+    # NotAutomatic, so it needs an explicit target release rather than joining
+    # the call above.
+    # Two packages that trixie proper cannot satisfy for a Wayland-enabled
+    # build. Backports is already enabled on this host because Hyprland comes
+    # from it (see ansible/host_vars/asterix.yml), and being NotAutomatic it
+    # needs an explicit target release rather than joining the call above.
+    #
+    #   libcpptrace-dev   backs the crash handler, which upstream asks
+    #                     packagers to leave enabled. Not in trixie at all.
+    #   wayland-protocols quickshell master references the ext-background-effect
+    #                     staging protocol, which first ships in 1.45; trixie
+    #                     has 1.44, backports has 1.47. This only bites with
+    #                     WAYLAND=ON - the old X11-only build compiled no
+    #                     protocol files and so never needed it.
+    echo ">>> Installing cpptrace and newer wayland-protocols from backports..."
+    sudo apt install -y -t trixie-backports libcpptrace-dev wayland-protocols
+}
+
+# Deliberately does NOT pull by default, unlike the other build_* scripts.
+# quickshell links private Qt APIs and the shell in this repo
+# (user/.config/quickshell/default) is written against the QML API of whatever
+# revision is checked out, so bumping the revision is a separate decision from
+# changing build flags - and a bad one to make silently while chasing a build
+# problem. Pass QS_PULL=1 when you actually mean to update.
+fetch_source() {
+    if [[ ! -d "${DEST}/.git" ]]; then
+        echo ">>> Cloning quickshell into ${DEST}..."
+        git clone "$REPO" "$DEST"
+    elif [[ "${QS_PULL:-0}" == "1" ]]; then
+        echo ">>> QS_PULL=1: updating ${DEST}..."
+        git -C "$DEST" pull --ff-only
+    else
+        echo ">>> Using the checked-out revision ($(git -C "$DEST" rev-parse --short HEAD));"
+        echo "    set QS_PULL=1 to update first."
+    fi
+}
+
+configure() {
+    # A stale cache from the old -DWAYLAND=OFF configure would otherwise win:
+    # CMake keeps cached option values, so flipping WAYLAND on requires either
+    # a fresh cache or an explicit override. Removing it is the honest option.
+    if [[ -f "${BUILD_DIR}/CMakeCache.txt" ]] \
+        && grep -q '^WAYLAND:BOOL=OFF' "${BUILD_DIR}/CMakeCache.txt"; then
+        echo ">>> Discarding the old X11-only CMake cache..."
+        rm -rf "$BUILD_DIR"
+    fi
+
+    echo ">>> Configuring..."
+    cmake -GNinja -B "$BUILD_DIR" -S "$DEST" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX="$PREFIX" \
+        -DDISTRIBUTOR="Local Debian Trixie i3+Hyprland build" \
+        -DWAYLAND=ON \
+        -DHYPRLAND=ON \
+        -DX11=ON \
+        -DI3=ON
+}
+
+build_and_install() {
+    echo ">>> Building..."
+    cmake --build "$BUILD_DIR"
+
+    echo ">>> Installing to ${PREFIX} (needs sudo)..."
+    sudo cmake --install "$BUILD_DIR"
+}
+
+verify() {
+    echo ">>> Installed version and feature set:"
+    "${PREFIX}/bin/quickshell" --version
+
+    if "${PREFIX}/bin/quickshell" --version | grep -q 'Hyprland: OFF'; then
+        echo "ERROR: Hyprland support is still off. Check the configure output" >&2
+        echo "       above for a missing Wayland dependency." >&2
+        exit 1
+    fi
+}
+
+install_build_dependencies
+fetch_source
+configure
+build_and_install
+verify
+
+echo
+echo ">>> Done. Restart the bar to pick up the new binary:"
+echo "      pkill -x quickshell; quickshell &"
