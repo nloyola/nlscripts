@@ -1,18 +1,29 @@
 #!/usr/bin/env bash
 # A different random wallpaper on every monitor, and a pywal palette built from
-# the first one. Run from the session autostart.
+# the first one. Run from the session autostart - i3/autostart.sh under i3, an
+# exec-once under Hyprland.
 #
 # The dealing lives in qs-wallpaper rather than here: it is the same code path
 # the quickshell display chip uses to set one monitor, so a login and a hand
 # pick agree on which wallpaper is on which output. Doing it with a bare `feh
 # --bg-fill a b` here would leave that record stale and the chip naming files
-# that are no longer on screen.
-export DISPLAY=':0'
+# that are no longer on screen. It is also what makes this work under both
+# sessions without a word about either: qs-wallpaper knows which of feh and the
+# quickshell background surfaces paints, and this script never needs to.
+#
+# This used to force DISPLAY=:0, because feh and xrandr needed an X server and
+# under i3 that server is always Xorg on :0. Nothing here needs one any more -
+# qs-wallpaper reaches Hyprland over hyprctl - so the only user left is the
+# xrdb at the bottom, and for that a guess is worse than nothing: under
+# Hyprland :0 is whatever Xwayland the compositor started, on a number it
+# picked, and off a session it would be some other server entirely. So take
+# whatever the session exported and no more.
 
 WALLPAPER="$HOME/.local/bin/qs-wallpaper"
 
-# One "<output>\t<file>" line per monitor; the wallpapers are already on screen
-# by the time this returns.
+# One "<output>\t<file>" line per monitor. Under i3 the wallpapers are on screen
+# by the time this returns; under Hyprland the record is written and the bar
+# repaints from it a moment later.
 dealt=$("$WALLPAPER" random "$HOME/Dropbox/wallpapers" "$HOME/wallpapers") || exit 1
 
 # Colours come from the first monitor's wallpaper. -n so wal leaves the
@@ -27,5 +38,10 @@ command -v wal >/dev/null || exit 0
 
 wal --backend colorz -n -i "$wall1"
 
-# Apply updated colors
-xrdb -merge ~/.cache/wal/colors.Xresources
+# Apply updated colors. Worth doing in both sessions - XWayland clients read
+# Xresources under Hyprland exactly as X11 clients do under i3 - but only when
+# a server is actually answering, otherwise this is one "unable to open
+# display" line in the session log at every login.
+if [ -n "$DISPLAY" ] && command -v xrdb >/dev/null; then
+    xrdb -merge ~/.cache/wal/colors.Xresources
+fi
