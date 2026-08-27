@@ -10,31 +10,62 @@
 #
 #   qs-display-scale set <output> <factor>
 #       Scale <output> so the desktop is magnified <factor> times, then
-#       re-pack every output left to right so the new framebuffer size does
-#       not leave the outputs overlapping or gapped.
+#       re-pack every output left to right so the new logical size does not
+#       leave the outputs overlapping or gapped.
 #
-# `factor` is UI magnification, not xrandr's scale: 2 means everything is
-# twice as big, i.e. a 4K panel renders a 1920x1080 desktop. The framebuffer
-# size is set with `--scale-from` rather than `--scale` so the rounding is
-# ours: non-integer factors (1.333, 3.13) are rounded down to an even pixel
-# count instead of whatever xrandr's own rounding produces.
+# `factor` is UI magnification: 2 means everything is twice as big, i.e. a 4K
+# panel renders a 1920x1080 desktop. Nothing is persisted - the current factor
+# is derived from the compositor itself, so the chip always reports what is
+# actually on screen.
 #
-# The current factor is derived from xrandr itself (mode width / framebuffer
-# width), so there is no state file and nothing to keep in sync - the chip
-# always reports what the X server is actually doing. Untouched outputs keep
-# their exact current framebuffer size, so repeated `set` calls cannot make a
-# rounded factor drift.
+# TWO BACKENDS. Under Hyprland this drives `hyprctl keyword monitor`; under an
+# X session it drives xrandr. The split is not cosmetic: XWayland answers
+# `xrandr --query` (so `list` looked fine) but rejects RRSetScreenSize with
+# BadMatch, so the xrandr-only version of this script was a silent no-op for
+# every Hyprland session - the chip drew the presets and clicking one did
+# nothing. XWayland also reports the outputs in its own left-to-right order,
+# which need not be Hyprland's, so even the geometry it did report was wrong.
+#
+# HYPRLAND ROUNDING. Hyprland quantizes every scale to a multiple of 1/120
+# (the wl_output scale-120 protocol) and then insists the logical size be
+# integral on BOTH axes. So the accepted scales for a mode are exactly k/120
+# for those k dividing both mode_w*120 and mode_h*120 - on 3840x2160, k must
+# divide 28800. Hyprland will snap an invalid scale to the nearest such k
+# itself, silently, which would leave the re-pack below computing positions
+# from a scale that is not the one in force. So we run the same search up
+# front and pass k/120 exactly, and `list` snaps the same way to recover the
+# true logical size from the two decimals hyprctl prints.
+#
+# XRANDR ROUNDING. The framebuffer size is set with `--scale-from` rather than
+# `--scale` so the rounding is ours: non-integer factors are rounded down to an
+# even pixel count instead of whatever xrandr's own rounding produces.
+# Untouched outputs keep their exact current framebuffer size, so repeated
+# `set` calls cannot make a rounded factor drift.
 #
 # Outputs are re-packed horizontally in their current left-to-right order,
 # each keeping its current y. A stacked (vertical) layout is not preserved.
 #
+# The X output with the framebuffer at the origin is the one xrandr marks
+# primary; Hyprland has no such concept, so there the origin itself is what
+# "primary" reports.
+#
 # QS_DISPLAY_SCALE_QUERY names a file to read instead of running xrandr, and
-# QS_DISPLAY_SCALE_DRY=1 prints the xrandr command instead of running it, so
-# both parsing and layout can be driven from fixtures.
+# QS_DISPLAY_SCALE_HYPR_QUERY does the same for `hyprctl monitors`;
+# QS_DISPLAY_SCALE_DRY=1 prints the command instead of running it, so both
+# parsing and layout can be driven from fixtures. Setting either QUERY var
+# also picks that backend, whatever session the fixture is run from.
 
 usage() {
     echo "usage: qs-display-scale list | set <output> <factor>" >&2
     exit 2
+}
+
+# Which compositor is in charge. The fixture vars win so a test can exercise
+# either backend from any session.
+use_hypr() {
+    [ -n "$QS_DISPLAY_SCALE_HYPR_QUERY" ] && return 0
+    [ -n "$QS_DISPLAY_SCALE_QUERY" ] && return 1
+    [ -n "$HYPRLAND_INSTANCE_SIGNATURE" ] && command -v hyprctl >/dev/null 2>&1
 }
 
 query() {
@@ -42,6 +73,14 @@ query() {
         cat "$QS_DISPLAY_SCALE_QUERY"
     else
         xrandr --query 2>/dev/null
+    fi
+}
+
+query_hypr() {
+    if [ -n "$QS_DISPLAY_SCALE_HYPR_QUERY" ]; then
+        cat "$QS_DISPLAY_SCALE_HYPR_QUERY"
+    else
+        hyprctl monitors 2>/dev/null
     fi
 }
 
@@ -84,6 +123,59 @@ parse() {
     '
 }
 
+# Parse `hyprctl monitors` into one TSV row per enabled monitor:
+#
+#   name  primary  mode_w  mode_h  refresh  x  y  scale  transform
+#
+# The first indented line of each block is "3840x2160@59.99700 at 3840x0"; the
+# rest are "key: value". A monitor at the origin is reported primary, Hyprland
+# having no primary of its own.
+parse_hypr() {
+    awk '
+      function emit() {
+          if (name != "" && !disabled && modew > 0)
+              printf "%s\t%s\t%d\t%d\t%s\t%d\t%d\t%.6f\t%d\n",
+                     name, (x == 0 && y == 0) ? "true" : "false",
+                     modew, modeh, rr, x, y, scale, tr
+          name = ""
+      }
+      /^Monitor / {
+          emit()
+          name = $2; disabled = 0
+          modew = 0; modeh = 0; rr = ""; x = 0; y = 0; scale = 1; tr = 0
+          next
+      }
+      name == "" { next }
+      modew == 0 && $1 ~ /^[0-9]+x[0-9]+@/ {
+          split($1, a, "@"); rr = a[2]
+          split(a[1], m, "x"); modew = m[1]; modeh = m[2]
+          split($3, p, "x"); x = p[1]; y = p[2]
+          next
+      }
+      $1 == "scale:"     { scale = $2; next }
+      $1 == "transform:" { tr = $2; next }
+      $1 == "disabled:"  { disabled = ($2 == "true"); next }
+      END { emit() }
+    '
+}
+
+# Shared by both hyprctl paths: the scale-120 numerator nearest f*120 that
+# Hyprland will actually accept for a w x h mode. Walks outward from the ideal
+# so the answer is always the closest valid scale, and falls back to 1x rather
+# than looping forever on a degenerate mode.
+HYPR_SCALE120='
+  function hypr_k(w, h, f,   base, d, c) {
+      if (f <= 0) return 120
+      base = int(f * 120 + 0.5)
+      if (base < 1) base = 1
+      for (d = 0; d <= 120 * 120; d++) {
+          c = base - d; if (c >= 1 && (w * 120) % c == 0 && (h * 120) % c == 0) return c
+          c = base + d; if ((w * 120) % c == 0 && (h * 120) % c == 0) return c
+      }
+      return 120
+  }
+'
+
 cmd_list() {
     query | parse | awk '
       BEGIN { printf "{\"outputs\":[" }
@@ -97,14 +189,35 @@ cmd_list() {
     '
 }
 
+cmd_list_hypr() {
+    query_hypr | parse_hypr | awk "$HYPR_SCALE120"'
+      BEGIN { printf "{\"outputs\":[" }
+      {
+          w = $3; h = $4; tr = $9
+          k = hypr_k(w, h, $8); lw = w * 120 / k; lh = h * 120 / k
+          # A rotated monitor occupies its logical size the other way round.
+          ow = lw; oh = lh
+          if (tr % 2 == 1) { ow = lh; oh = lw }
+          if (n++) printf ","
+          printf "{\"name\":\"%s\",\"primary\":%s,\"mode\":\"%dx%d\",", $1, $2, w, h
+          printf "\"logical\":\"%dx%d\",\"w\":%d,\"h\":%d,", ow, oh, ow, oh
+          printf "\"x\":%d,\"y\":%d,\"factor\":%.3f}", $6, $7, k / 120
+      }
+      END { printf "]}\n" }
+    '
+}
+
+check_factor() {
+    case $1 in
+        *[!0-9.]* | '' | .) echo "qs-display-scale: bad factor: $1" >&2; exit 2 ;;
+    esac
+}
+
 cmd_set() {
     target=$1
     factor=$2
     [ -n "$target" ] && [ -n "$factor" ] || usage
-
-    case $factor in
-        *[!0-9.]* | '' | .) echo "qs-display-scale: bad factor: $factor" >&2; exit 2 ;;
-    esac
+    check_factor "$factor"
 
     args=$(query | parse | sort -t "$(printf '\t')" -k7,7n | awk -v target="$target" -v factor="$factor" '
       function even(v) { v = int(v); if (v % 2) v--; return (v < 2) ? 2 : v }
@@ -129,8 +242,43 @@ cmd_set() {
     fi
 }
 
+cmd_set_hypr() {
+    target=$1
+    factor=$2
+    [ -n "$target" ] && [ -n "$factor" ] || usage
+    check_factor "$factor"
+
+    # One --batch so the outputs never land in an overlapping intermediate
+    # state, and every monitor is restated with its own current mode, refresh
+    # and scale so only position and the target's scale actually move.
+    args=$(query_hypr | parse_hypr | sort -t "$(printf '\t')" -k6,6n |
+        awk -v target="$target" -v factor="$factor" "$HYPR_SCALE120"'
+      {
+          w = $3; h = $4; tr = $9
+          f = $8
+          if ($1 == target) { found = 1; f = factor }
+          k = hypr_k(w, h, f); lw = w * 120 / k; lh = h * 120 / k
+          # The scale we ask for is exact by construction, so Hyprland has no
+          # snapping of its own to do and the re-pack below stays honest.
+          printf " ; keyword monitor %s,%dx%d@%s,%dx%d,%.6f", $1, w, h, $5, x, $7, k / 120
+          x += (tr % 2 == 1) ? lh : lw
+      }
+      END { if (!found) exit 3 }
+    ') ||
+        { echo "qs-display-scale: no such enabled output: $target" >&2; exit 3; }
+
+    [ -n "$args" ] || { echo "qs-display-scale: no enabled outputs" >&2; exit 3; }
+
+    batch=${args# ; }
+    if [ "$QS_DISPLAY_SCALE_DRY" = 1 ]; then
+        echo "hyprctl --batch $batch"
+    else
+        hyprctl --batch "$batch"
+    fi
+}
+
 case $1 in
-    list) cmd_list ;;
-    set)  shift; cmd_set "$@" ;;
+    list) if use_hypr; then cmd_list_hypr; else cmd_list; fi ;;
+    set)  shift; if use_hypr; then cmd_set_hypr "$@"; else cmd_set "$@"; fi ;;
     *)    usage ;;
 esac
