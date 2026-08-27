@@ -42,6 +42,18 @@
 # Untouched outputs keep their exact current framebuffer size, so repeated
 # `set` calls cannot make a rounded factor drift.
 #
+# POINTER SPEED. Hyprland moves the cursor in logical coordinates, so the same
+# hand motion crosses a scaled output in fewer logical pixels but the same
+# physical distance on glass - at scale 2 the pointer visibly flies. `set`
+# therefore also writes input:sensitivity, libinput's accel speed, as
+# 1/scale - 1 (scale 1 -> 0, Hyprland's own default; 1.5 -> -0.333; 2 -> -0.5),
+# which holds hand-distance-per-inch-of-screen roughly constant. Roughly: the
+# adaptive accel profile is not linear in this value, so the correction is
+# right in direction and about right in size, not literal. Sensitivity is
+# global while scale is per-output, so it follows the output just scaled - the
+# one being looked at. Like the scale itself nothing is persisted, and a
+# `hyprctl reload` drops both back to what hyprland.conf says.
+#
 # Outputs are re-packed horizontally in their current left-to-right order,
 # each keeping its current y. A stacked (vertical) layout is not preserved.
 #
@@ -258,12 +270,23 @@ cmd_set_hypr() {
           f = $8
           if ($1 == target) { found = 1; f = factor }
           k = hypr_k(w, h, f); lw = w * 120 / k; lh = h * 120 / k
+          if ($1 == target) tk = k
           # The scale we ask for is exact by construction, so Hyprland has no
           # snapping of its own to do and the re-pack below stays honest.
           printf " ; keyword monitor %s,%dx%d@%s,%dx%d,%.6f", $1, w, h, $5, x, $7, k / 120
           x += (tr % 2 == 1) ? lh : lw
       }
-      END { if (!found) exit 3 }
+      END {
+          if (!found) exit 3
+          # Pointer speed compensation - see POINTER SPEED above. Derived from
+          # the snapped k, not the requested factor, so it cannot disagree with
+          # the scale actually in force. Only a scale of 0.5 or below hits the
+          # clamp, at which point the pointer is as fast as libinput allows.
+          s = 120 / tk - 1
+          if (s < -1) s = -1
+          else if (s > 1) s = 1
+          printf " ; keyword input:sensitivity %.3f", s
+      }
     ') ||
         { echo "qs-display-scale: no such enabled output: $target" >&2; exit 3; }
 
