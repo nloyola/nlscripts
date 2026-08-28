@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DEST=$HOME/src/github/ghostty
+DEST=$HOME/src/github/desktop/ghostty
 REPO=https://github.com/ghostty-org/ghostty
 
 install_build_dependencies() {

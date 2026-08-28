@@ -17,7 +17,7 @@ set -euo pipefail
 # The compiler comes from the nix profile - nix/rust-toolchain.nix puts rustc
 # and cargo on PATH. rustup is deliberately NOT used on these hosts any more.
 
-DEST=$HOME/src/github/tools/alacritty
+DEST=$HOME/src/github/desktop/alacritty
 REPO=https://github.com/alacritty/alacritty
 BINDIR=$HOME/bin
 
