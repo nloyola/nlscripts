@@ -66,22 +66,54 @@ resolve_zig() {
     command -v "$binary"
 }
 
+check_cache_ownership() {
+    # A tree built by the old `sudo zig build` has a root-owned .zig-cache that
+    # an unprivileged build cannot write into. Fail early with the fix rather
+    # than part way through a compile.
+    local cache="${DEST}/.zig-cache"
+    [[ -e "$cache" ]] || return 0
+    [[ "$(stat -c %U "$cache")" == "$(id -un)" ]] && return 0
+
+    echo "ERROR: ${cache} is owned by $(stat -c %U "$cache"), not $(id -un)." >&2
+    echo "       It was created by an older version of this script that ran zig" >&2
+    echo "       under sudo. Remove it once and re-run:" >&2
+    echo "         sudo rm -rf ${cache}" >&2
+    exit 1
+}
+
 install_build_dependencies
+check_cache_ownership
 
-if [[ -d "${DEST}.old" ]]; then
-    rm -rf "${DEST}.old"
+# Update in place instead of rotating the checkout to <dest>.old and re-cloning.
+# The rotation left a stale duplicate of the whole tree behind on every build,
+# and once a tree had been built under sudo, its root-owned .zig-cache made the
+# next run's `rm -rf "${DEST}.old"` fail with EPERM and abort under `set -e`.
+if [[ -d "${DEST}/.git" ]]; then
+    echo ">>> Updating existing checkout in ${DEST}..."
+    git -C "$DEST" fetch --depth 1 origin main
+    git -C "$DEST" reset --hard FETCH_HEAD
+    # Keep the build caches - they are what make a rebuild incremental.
+    git -C "$DEST" clean -xfd -e .zig-cache -e zig-pkg
+else
+    echo ">>> Cloning ${REPO} into ${DEST}..."
+    git clone --depth 1 "$REPO" "$DEST"
 fi
-
-if [[ -d "${DEST}" ]]; then
-    mv "$DEST" "${DEST}.old"
-fi
-
-git clone --depth 1 "$REPO" "$DEST"
 
 ZIG_VERSION=$(required_zig_version)
 echo ">>> ghostty requires zig ${ZIG_VERSION}."
 ZIG=$(resolve_zig "$ZIG_VERSION")
 echo ">>> Using ${ZIG}"
 
+# Build unprivileged, install privileged. Running zig itself under sudo made
+# every artifact in .zig-cache and zig-pkg root-owned, which then needed sudo
+# to clean up and broke the checkout update above.
 cd "$DEST"
-sudo "$ZIG" build -p /usr/local -Doptimize=ReleaseFast
+
+STAGE=$(mktemp -d)
+trap 'rm -rf "$STAGE"' EXIT
+
+echo ">>> Building into ${STAGE} (unprivileged)..."
+"$ZIG" build -p "$STAGE" -Doptimize=ReleaseFast
+
+echo ">>> Installing to /usr/local (needs sudo)..."
+sudo cp -a "$STAGE"/. /usr/local/

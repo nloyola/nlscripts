@@ -62,16 +62,18 @@ install_build_dependencies
 CARGO=$(resolve_cargo)
 echo ">>> Using $CARGO ($("$CARGO" --version))"
 
-if [[ -d "${DEST}.old" ]]; then
-    rm -rf "${DEST}.old"
+# Update in place instead of rotating the checkout to <dest>.old and re-cloning.
+# The rotation left a stale duplicate of the whole tree behind on every build and
+# re-downloaded the full history each time. Full clone, not --depth 1: the tag
+# list below is how the release is chosen.
+if [[ -d "${DEST}/.git" ]]; then
+    echo ">>> Updating existing checkout in ${DEST}..."
+    git -C "$DEST" fetch --tags --force --prune origin
+    git -C "$DEST" reset --hard
+else
+    echo ">>> Cloning ${REPO} into ${DEST}..."
+    git clone "$REPO" "$DEST"
 fi
-
-if [[ -d "${DEST}" ]]; then
-    mv "$DEST" "${DEST}.old"
-fi
-
-# Full clone, not --depth 1: the tag list below is how the release is chosen.
-git clone "$REPO" "$DEST"
 cd "$DEST"
 
 TAG=$(latest_release_tag)
