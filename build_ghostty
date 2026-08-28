@@ -17,7 +17,8 @@ install_build_dependencies() {
         libadwaita-1-dev \
         blueprint-compiler \
         gettext \
-        pkg-config
+        pkg-config \
+        patchelf
 }
 
 required_zig_version() {
@@ -66,23 +67,26 @@ resolve_zig() {
     command -v "$binary"
 }
 
-check_cache_ownership() {
-    # A tree built by the old `sudo zig build` has a root-owned .zig-cache that
-    # an unprivileged build cannot write into. Fail early with the fix rather
-    # than part way through a compile.
-    local cache="${DEST}/.zig-cache"
-    [[ -e "$cache" ]] || return 0
-    [[ "$(stat -c %U "$cache")" == "$(id -un)" ]] && return 0
+reclaim_caches() {
+    # zig runs under sudo below, so everything it writes into the checkout is
+    # root-owned until the chown at the end of a successful run. If a previous
+    # run died before that point, the git fetch and clean here would fail with
+    # EPERM, so take ownership up front rather than part way through.
+    local stale=()
+    local dir
+    for dir in "${DEST}/.zig-cache" "${DEST}/zig-pkg"; do
+        [[ -e "$dir" ]] || continue
+        [[ "$(stat -c %U "$dir")" == "$(id -un)" ]] && continue
+        stale+=("$dir")
+    done
+    [[ ${#stale[@]} -eq 0 ]] && return 0
 
-    echo "ERROR: ${cache} is owned by $(stat -c %U "$cache"), not $(id -un)." >&2
-    echo "       It was created by an older version of this script that ran zig" >&2
-    echo "       under sudo. Remove it once and re-run:" >&2
-    echo "         sudo rm -rf ${cache}" >&2
-    exit 1
+    echo ">>> Reclaiming ${#stale[@]} root-owned cache dir(s) from a previous run..."
+    sudo chown -R "$(id -u):$(id -g)" "${stale[@]}"
 }
 
 install_build_dependencies
-check_cache_ownership
+reclaim_caches
 
 # Update in place instead of rotating the checkout to <dest>.old and re-cloning.
 # The rotation left a stale duplicate of the whole tree behind on every build,
@@ -92,8 +96,13 @@ if [[ -d "${DEST}/.git" ]]; then
     echo ">>> Updating existing checkout in ${DEST}..."
     git -C "$DEST" fetch --depth 1 origin main
     git -C "$DEST" reset --hard FETCH_HEAD
-    # Keep the build caches - they are what make a rebuild incremental.
-    git -C "$DEST" clean -xfd -e .zig-cache -e zig-pkg
+    # Clean everything, caches included. Tempting as an incremental rebuild is,
+    # the cache records which libc zig resolved when it was populated, and this
+    # build only produces a correct binary under sudo (see below). A cache left
+    # from a run in a different environment is silently reused, zig's install
+    # step then skips the byte-identical result, and the build reports success
+    # while /usr/local keeps the old broken binary. Always start cold.
+    git -C "$DEST" clean -xfd
 else
     echo ">>> Cloning ${REPO} into ${DEST}..."
     git clone --depth 1 "$REPO" "$DEST"
@@ -104,16 +113,71 @@ echo ">>> ghostty requires zig ${ZIG_VERSION}."
 ZIG=$(resolve_zig "$ZIG_VERSION")
 echo ">>> Using ${ZIG}"
 
-# Build unprivileged, install privileged. Running zig itself under sudo made
-# every artifact in .zig-cache and zig-pkg root-owned, which then needed sudo
-# to clean up and broke the checkout update above.
 cd "$DEST"
 
-STAGE=$(mktemp -d)
-trap 'rm -rf "$STAGE"' EXIT
+# The sudo is just write access to /usr/local, nothing more.
+echo ">>> Building and installing to /usr/local (needs sudo)..."
+sudo "$ZIG" build -p /usr/local -Doptimize=ReleaseFast
 
-echo ">>> Building into ${STAGE} (unprivileged)..."
-"$ZIG" build -p "$STAGE" -Doptimize=ReleaseFast
+# Point the binary at the system dynamic loader.
+#
+# zig comes from nixpkgs, so its native target resolution picks nix's glibc and
+# bakes that store path in as the interpreter:
+#
+#   /nix/store/<hash>-glibc-<version>/lib/ld-linux-x86-64.so.2
+#
+# That loader only searches nix store paths, so it never finds the system
+# libxcb the gtk4 stack pulls in, and ghostty dies at startup with
+# "libxcb.so.1: cannot open shared object file". Everything else about the
+# binary is correct - it links the system gtk4/libadwaita fine, and running it
+# through /lib64/ld-linux-x86-64.so.2 by hand works - so only PT_INTERP needs
+# rewriting.
+#
+# Both build-time alternatives were tried on 2026-08-28 and both fail:
+#
+#   -Dtarget=native-linux-gnu
+#       Naming the abi makes the target non-native, so zig stops adding
+#       /usr/include and /usr/lib: "unable to find dynamic system library
+#       'xcb' ... searched paths: none".
+#
+#   -Dtarget=native-linux-gnu --search-prefix /usr
+#       Finds the libraries and does produce the right interpreter, but puts
+#       /usr/include ahead of zig's bundled libc++ headers, so <cstring>
+#       resolves <string.h> to Debian's and the vendored C++ in pkg/simdutf
+#       fails to compile ("didn't find libc++'s <string.h> header", 12 errors).
+#
+#   --dynamic-linker
+#       Rejected outright: LldCannotSpecifyDynamicLinkerForSharedLibraries,
+#       because this build also produces libghostty-vt.so.
+#
+# Native mode is required for pkg-config to supply gtk4's header dirs, and
+# native mode is exactly what bakes in the nix interpreter. Rewriting the one
+# wrong ELF field afterwards is the narrowest correction available.
+#
+# This only surfaced when zig moved into the nix profile. The older
+# nlscripts/install_zig unpacked ziglang.org tarballs into /usr/local, and that
+# zig resolved the system loader on its own.
+SYSTEM_LOADER=/lib64/ld-linux-x86-64.so.2
+if [[ ! -e "$SYSTEM_LOADER" ]]; then
+    echo "ERROR: ${SYSTEM_LOADER} not found; cannot fix the interpreter." >&2
+    exit 1
+fi
 
-echo ">>> Installing to /usr/local (needs sudo)..."
-sudo cp -a "$STAGE"/. /usr/local/
+echo ">>> Pointing the interpreter at ${SYSTEM_LOADER}..."
+sudo patchelf --set-interpreter "$SYSTEM_LOADER" /usr/local/bin/ghostty
+
+# Everything zig wrote as root now belongs to the invoking user again, so the
+# next run can update the checkout and clean the tree without sudo.
+echo ">>> Restoring cache ownership to $(id -un)..."
+sudo chown -R "$(id -u):$(id -g)" "$DEST/.zig-cache" "$DEST/zig-pkg" 2>/dev/null || true
+
+# Smoke test. A build can succeed and still install something that will not
+# start - a wrong interpreter does exactly that, and nothing else here would
+# notice.
+if ! /usr/local/bin/ghostty --version >/dev/null 2>&1; then
+    echo "ERROR: the installed ghostty does not start:" >&2
+    /usr/local/bin/ghostty --version 2>&1 | sed 's/^/       /' >&2
+    exit 1
+fi
+
+echo ">>> Installed $(/usr/local/bin/ghostty --version | head -n1)"
