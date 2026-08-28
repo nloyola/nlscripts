@@ -74,7 +74,8 @@ reclaim_caches() {
     # EPERM, so take ownership up front rather than part way through.
     local stale=()
     local dir
-    for dir in "${DEST}/.zig-cache" "${DEST}/zig-pkg"; do
+    for dir in "${DEST}/.zig-cache" "${DEST}/zig-pkg" \
+               "${DEST}.old/.zig-cache" "${DEST}.old/zig-pkg"; do
         [[ -e "$dir" ]] || continue
         [[ "$(stat -c %U "$dir")" == "$(id -un)" ]] && continue
         stale+=("$dir")
@@ -88,25 +89,26 @@ reclaim_caches() {
 install_build_dependencies
 reclaim_caches
 
-# Update in place instead of rotating the checkout to <dest>.old and re-cloning.
-# The rotation left a stale duplicate of the whole tree behind on every build,
-# and once a tree had been built under sudo, its root-owned .zig-cache made the
-# next run's `rm -rf "${DEST}.old"` fail with EPERM and abort under `set -e`.
-if [[ -d "${DEST}/.git" ]]; then
-    echo ">>> Updating existing checkout in ${DEST}..."
-    git -C "$DEST" fetch --depth 1 origin main
-    git -C "$DEST" reset --hard FETCH_HEAD
-    # Clean everything, caches included. Tempting as an incremental rebuild is,
-    # the cache records which libc zig resolved when it was populated, and this
-    # build only produces a correct binary under sudo (see below). A cache left
-    # from a run in a different environment is silently reused, zig's install
-    # step then skips the byte-identical result, and the build reports success
-    # while /usr/local keeps the old broken binary. Always start cold.
-    git -C "$DEST" clean -xfd
-else
-    echo ">>> Cloning ${REPO} into ${DEST}..."
-    git clone --depth 1 "$REPO" "$DEST"
+# Rotate the previous checkout aside and clone fresh. Keeping the tree and
+# fetching into it was tried on 2026-08-28 and is a trap here: zig's cache
+# records which libc it resolved when it was populated, a cache from an earlier
+# environment gets reused silently, and zig's install step then skips the
+# byte-identical result. The build reports success while /usr/local keeps the
+# old binary. A fresh clone is cold by construction, and <dest>.old stays
+# around as the previous tree if a build needs comparing against it.
+#
+# reclaim_caches above is what keeps the rm below from failing: zig runs under
+# sudo, so a run that died before the chown at the end leaves root-owned cache
+# dirs that this user cannot remove.
+if [[ -d "${DEST}.old" ]]; then
+    rm -rf "${DEST}.old"
 fi
+
+if [[ -d "${DEST}" ]]; then
+    mv "$DEST" "${DEST}.old"
+fi
+
+git clone --depth 1 "$REPO" "$DEST"
 
 ZIG_VERSION=$(required_zig_version)
 echo ">>> ghostty requires zig ${ZIG_VERSION}."
