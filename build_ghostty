@@ -67,6 +67,41 @@ resolve_zig() {
     command -v "$binary"
 }
 
+patch_gtk_css() {
+    # Ghostty's GTK stylesheet uses CSS colour interpolation hints:
+    #
+    #   background: linear-gradient(to left, transparent, 50%, rgba(...) 50%);
+    #
+    # A bare percentage between two colour stops is a valid hint per the CSS
+    # spec and renders fine in browsers, but GTK's parser does not implement
+    # hints and rejects it with "Expected a valid color". GTK then discards the
+    # whole declaration, so the drag-to-edge drop overlay loses its highlight
+    # and every launch logs four theme parser errors. Dropping the hint keeps
+    # the gradient and satisfies GTK.
+    #
+    # The rotation re-clones on every build, so this has to be reapplied each
+    # time. Upstream is src/apprt/gtk/css/style.css, the four
+    # .drop-overlay.drop-* rules; when upstream fixes it the count check below
+    # stops matching and this turns into a no-op with a warning.
+    local css="${DEST}/src/apprt/gtk/css/style.css"
+    if [[ ! -f "$css" ]]; then
+        echo ">>> ${css} not found, skipping the CSS patch." >&2
+        return 0
+    fi
+
+    local found
+    found=$(grep -cE '^[[:space:]]*50%,$' "$css" || true)
+    if [[ "$found" -ne 4 ]]; then
+        echo ">>> style.css has ${found} interpolation hint(s), expected 4." >&2
+        echo "    Skipping the CSS patch - upstream may have fixed this, in" >&2
+        echo "    which case drop patch_gtk_css from this script." >&2
+        return 0
+    fi
+
+    sed -i -E '/^[[:space:]]*50%,$/d' "$css"
+    echo ">>> Removed ${found} CSS interpolation hint(s) from style.css."
+}
+
 reclaim_caches() {
     # zig runs under sudo below, so everything it writes into the checkout is
     # root-owned until the chown at the end of a successful run. If a previous
@@ -109,6 +144,8 @@ if [[ -d "${DEST}" ]]; then
 fi
 
 git clone --depth 1 "$REPO" "$DEST"
+
+patch_gtk_css
 
 ZIG_VERSION=$(required_zig_version)
 echo ">>> ghostty requires zig ${ZIG_VERSION}."
