@@ -111,6 +111,14 @@
 # `wait` that times out means slow, not dead - check `pane read` before assuming
 # the run is gone.
 #
+# Between steps the loop looks at how full the usage windows are, reading the
+# rate-limit report Claude Code puts on the session stream. Over 80% of either
+# the 5-hour session limit or the weekly one, it stops before starting the next
+# session and asks at the terminal whether to go on anyway. A session cut off
+# mid-step by a limit ticks nothing and leaves a half-finished tree behind, so
+# the loop would rather hand the decision back one step early. With no terminal
+# to ask - and without jq, which is what reads the stream - it stops instead.
+#
 # Push notifications go to ntfy as each step lands, when every step is done, and
 # on any early stop. Every abnormal exit notifies, so silence means the loop is
 # still working rather than dead.
@@ -383,7 +391,16 @@ JQ
 stream=1
 if ! command -v jq >/dev/null 2>&1; then
   stream=""
-  echo "!! jq not found; running without live progress" >&2
+  echo "!! jq not found; running without live progress or usage checks" >&2
+fi
+
+# The same stream carries the rate-limit reports the usage gate reads, so it is
+# kept for the length of a session rather than only rendered. One file, rewritten
+# per session: only the session that just ran is ever asked about.
+stream_file=""
+if [ -n "$stream" ]; then
+  stream_file=$(mktemp "${TMPDIR:-/tmp}/advance-issue-loop.XXXXXX")
+  trap 'rm -f "$stream_file"' EXIT
 fi
 
 # Claude Code ships a herdr integration: a SessionStart hook that tells herdr the
@@ -412,11 +429,114 @@ run_session() {
     return $?
   fi
 
+  # tee sits in the pipeline rather than in a background process substitution so
+  # the capture is complete the moment the pipeline returns; read_usage below
+  # then never races the writer.
+  : >"$stream_file"
   "${hide_herdr[@]}" claude -p --output-format stream-json --verbose \
     --permission-mode acceptEdits --effort "$effort" "$1" |
+    tee "$stream_file" |
     jq -r --unbuffered "$progress_filter"
   local rc=${PIPESTATUS[0]}
   return "$rc"
+}
+
+# Percent of each usage window, and when each one resets, as of the last session
+# that ran. Empty until a session has reported: nothing is assumed about a window
+# nobody has measured, and the gate below stays out of the way until then.
+usage_threshold=80
+limit_five=""
+limit_seven=""
+reset_five=0
+reset_seven=0
+
+# Claude Code emits a `rate_limit_event` on the stream whenever the numbers move,
+# carrying both windows as fractions. Take the last one of the session.
+#
+# A session that moved nothing emits none, and then the previous reading stands:
+# it is still the most recent thing known, and a missing event is not a reason to
+# believe a window emptied.
+read_usage() {
+  [ -n "$stream" ] && [ -s "$stream_file" ] || return 0
+
+  local line
+  line=$(jq -r 'select(.type == "rate_limit_event")
+                | .rate_limit_info.unifiedWindows // empty
+                | [((.five_hour.utilization // 0) * 100 | round),
+                   ((.seven_day.utilization // 0) * 100 | round),
+                   (.five_hour.resetsAt // 0),
+                   (.seven_day.resetsAt // 0)]
+                | @tsv' "$stream_file" 2>/dev/null | tail -n1)
+  [ -n "$line" ] || return 0
+
+  IFS=$'\t' read -r limit_five limit_seven reset_five reset_seven <<<"$line"
+}
+
+# eta <epoch> -> 1h12m, 9m, <1m; empty when the reset time is unknown
+eta() {
+  local at=${1:-0} remaining
+  [ "$at" -gt 0 ] 2>/dev/null || return 0
+  remaining=$((at - $(date +%s)))
+  ((remaining < 0)) && remaining=0
+  if ((remaining >= 3600)); then
+    printf '%dh%02dm' $((remaining / 3600)) $((remaining % 3600 / 60))
+  elif ((remaining >= 60)); then
+    printf '%dm' $((remaining / 60))
+  else
+    printf '<1m'
+  fi
+}
+
+# usage_gate <next-session-number> <steps-still-open>
+#
+# A step that runs into a limit is worse than a step not started: the session
+# dies partway, ticks nothing, and leaves whatever it had done in the tree. So
+# past the threshold the loop stops and asks first.
+#
+# Asked on /dev/tty, not stdin: the loop is often started with its stdin pointed
+# somewhere else entirely, and answering on stdin would then be impossible.
+usage_gate() {
+  local next=$1 open=$2 window pct resets where answer
+
+  if [ -n "$limit_five" ] && [ "$limit_five" -ge "$usage_threshold" ]; then
+    window="5-hour session limit"
+    pct=$limit_five
+    resets=$(eta "$reset_five")
+  elif [ -n "$limit_seven" ] && [ "$limit_seven" -ge "$usage_threshold" ]; then
+    window="7-day limit"
+    pct=$limit_seven
+    resets=$(eta "$reset_seven")
+  else
+    return 0
+  fi
+
+  where="$window at $pct%"
+  [ -z "$resets" ] || where="$where (resets in $resets)"
+
+  # Nobody to answer means nobody to wait for. Tested by opening the terminal
+  # rather than by `[ -r /dev/tty ]`: the device node exists and is readable to
+  # anyone, so the test passes in a session that has no controlling terminal at
+  # all, and the open is the only thing that actually fails there.
+  if ! { : <>/dev/tty; } 2>/dev/null; then
+    die "$where, and no terminal to ask. Stopped before session $next with $open step(s) open; rerun to continue."
+  fi
+
+  echo "!! $where"
+  herdr_state blocked "$where; waiting on you before session $next"
+  notify "$repo #$issue usage $pct%" urgent hourglass \
+    "$where. Session $next on $branch is waiting at the terminal: answer to go on, or run the next step yourself later."
+
+  printf '   continue with session %s anyway? [y/N] ' "$next" >/dev/tty
+  read -r answer </dev/tty || answer=""
+  case "$answer" in
+    y | Y | yes | YES)
+      echo "==> continuing at $pct% of the $window"
+      herdr_state working "resumed at $pct%"
+      ;;
+    *)
+      die "$where. Stopped before session $next with $open step(s) open; rerun to continue."
+      ;;
+  esac
 }
 
 unchecked() {
@@ -624,12 +744,18 @@ for ((i = 1; i <= max; i++)); do
   gates=$(unmet_gates) ||
     die "Next step of #$issue is gated: $gates. $before_open step(s) still open."
 
+  # After the gates and before the work: a run that stops here has pushed
+  # everything the last session did and left the next step untouched.
+  usage_gate "$i" "$before_open"
+
   before_head=$(git rev-parse HEAD)
   echo "==> session $i starting at $effort effort: $before_open step(s) remaining"
   herdr_state working "session $i, $((total - before_open))/$total done"
 
   run_session "Use the advance-issue-step skill to implement the next unchecked step of GitHub issue #$issue. Stay on the current branch ($branch); do not create, switch, or merge branches, and do not open a pull request." ||
     die "Session $i exited non-zero. $before_open step(s) still open."
+
+  read_usage
 
   committed=false
   [ "$(git rev-parse HEAD)" = "$before_head" ] || committed=true
