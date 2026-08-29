@@ -1,16 +1,68 @@
 #!/usr/bin/env sh
 
-# Power menu script using tofi
+# Power menu for the $mod+P binding, shared by the i3, sway and Hyprland
+# sessions (i3/config, sway/config, hypr/hyprland.conf) and by polybar's
+# powermenu module.
+#
+# Each session locks and exits with its own tools, so the compositor is
+# detected at runtime rather than assumed. The previous version assumed i3:
+# it ran i3lock, which cannot lock a Wayland session.
+#
+# The labels are defined once, as variables, and the case below matches those
+# same variables. They used to be written out twice - printed as "Power Off",
+# "Restart" and "Logout" but matched as "Shutdown", "Reboot" and "Log Out" -
+# so three of the five entries fell through to the catch-all and did nothing.
+#
+# Nothing here uses sudo. logind grants suspend, reboot and power-off to an
+# active local session through polkit (`busctl call org.freedesktop.login1
+# /org/freedesktop/login1 org.freedesktop.login1.Manager CanReboot` answers
+# "yes"), and a sudo password prompt has no terminal to appear on when the
+# menu is launched from a keybinding.
 
-#CHOSEN=$(printf "󰒲 Suspend\n  Power Off\n  Restart\n  Lock" | rofi -dmenu -p "power menu")
-CHOSEN=$(printf "Suspend\nPower Off\nRestart\nLock\nLogout" | rofi -dmenu -p "Power Menu
-")
+set -u
+
+LOCK="  Lock"
+SUSPEND="󰒲  Suspend"
+LOGOUT="󰍃  Log out"
+REBOOT="󰜉  Restart"
+SHUTDOWN="󰐥  Power off"
+
+# Locker and session-exit command per compositor. HYPRLAND_INSTANCE_SIGNATURE
+# and SWAYSOCK are set by the compositors themselves, so this holds for a
+# session started any way; i3 is the remaining X11 case. The lock colour is
+# the one the $mod+Escape bindings in i3/config and sway/config already use.
+if [ -n "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]; then
+	locker="hyprlock"
+	exit_session="hyprctl dispatch exit"
+elif [ -n "${SWAYSOCK:-}" ]; then
+	locker="swaylock -c 282c34"
+	exit_session="swaymsg exit"
+else
+	locker="i3lock -c 282c34"
+	exit_session="i3-msg exit"
+fi
+
+lock_session() {
+	# Fall back to logind rather than leaving the screen unlocked: swaylock in
+	# particular is not installed on every host this script is deployed to.
+	if command -v "${locker%% *}" >/dev/null 2>&1; then
+		$locker
+	else
+		loginctl lock-session
+	fi
+}
+
+CHOSEN=$(printf '%s\n' "$LOCK" "$SUSPEND" "$LOGOUT" "$REBOOT" "$SHUTDOWN" |
+	rofi -dmenu -i -p "Power" -lines 5)
+
+# Empty means the menu was dismissed, which is not an error.
+[ -n "$CHOSEN" ] || exit 0
 
 case "$CHOSEN" in
-	"Lock") i3lock ;;
-	"Suspend") sudo systemctl suspend ;;
-	"Reboot") sudo reboot ;;
-	"Shutdown") sudo poweroff ;;
-	"Log Out") loginctl terminate-user $USER ;;
+	"$LOCK") lock_session ;;
+	"$SUSPEND") systemctl suspend ;;
+	"$LOGOUT") $exit_session ;;
+	"$REBOOT") systemctl reboot ;;
+	"$SHUTDOWN") systemctl poweroff ;;
 	*) exit 1 ;;
 esac
