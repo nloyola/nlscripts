@@ -1,0 +1,408 @@
+#!/bin/sh
+# One palette, six apps. The desktop's theme resolver and renderer.
+#
+#   qs-theme set <name>
+#       Resolve <name>, render every template in ~/.config/theme/templates
+#       into ~/.local/state/theme, deal that theme's wallpapers to the
+#       monitors, tell the running apps to re-read, and record the name. This
+#       is the single entry point: the bar chip, the theme IpcHandler, a
+#       keybind and a TTY all come through here.
+#
+#   qs-theme list        Theme names, one per line, in cycle order.
+#   qs-theme wallpapers [name]
+#                        The wallpapers a theme owns, expanded, one path per
+#                        line.
+#   qs-theme previews    Every theme's name, preview image and colours, as
+#                        JSON, for the picker grid (qs-theme-picker).
+#   qs-theme current     The theme in force.
+#   qs-theme cycle       Set the next one after it, wrapping.
+#   qs-theme color <key> [fallback]
+#       One resolved value for the current theme - authored or derived. This
+#       is the hook for anything that wants a colour without a template.
+#
+# WHY A DIRECTORY OF THEMES AND NOT A WALLPAPER. Picking a wallpaper does not
+# retheme anything, here or in Omarchy, whose model this follows: a theme is
+# the primary object and its wallpapers are a property of it, chosen to suit
+# it. Nothing derives a palette from an image. That was tried here once and
+# backed out - see ~/.config/rofi/config.pre-pywal.rasi.
+#
+# WHY THE STATE DIRECTORY IS NOT UNDER ~/.config. Home Manager symlinks
+# ~/.config/theme live into the home_config working tree (nix/hosts/asterix.nix),
+# so anything generated under it would dirty the repo on every theme switch.
+# The generated files are therefore in ${XDG_STATE_HOME:-~/.local/state}/theme,
+# and each consumer is pointed at them by an include directive it already had:
+#
+#   palette.json          quickshell bar   FileView               live
+#   theme.name            bar, scripts     FileView               live
+#   alacritty-colors.toml alacritty        import =               automatic
+#   ghostty-colors.conf   ghostty          config-file =          SIGUSR2
+#   rofi-colors.rasi      rofi             @import                next launch
+#   hypr-colors.conf      Hyprland         source = + $vars       hyprctl reload
+#   mako-config           mako             mako -c <path>         makoctl reload
+#
+# Two consumers have no include directive, so their whole config is generated:
+# mako (which is why its template carries settings that are not colours) and
+# btm, whose ~/.config/bottom/bottom.toml is written in place.
+#
+# THE CASCADE. A theme authors ~17 keys and gets ~40, so a template can ask for
+# bright_red or color9 without every theme having to spell them out. In order:
+# the file, then semantic defaults (orange <- yellow, inactive <- dim,
+# critical <- red, cursor <- bright_foreground, selection <- lighter_background),
+# then derived shades by linear mix, then ANSI aliasing, then light/dark mode
+# by luminance. `qs-theme color <key>` is the way to see what any of it
+# resolved to.
+#
+# QS_THEME_DIR relocates the theme directory, QS_THEME_STATE the generated one,
+# QS_THEME_BOTTOM the btm config, and QS_THEME_DRY=1 renders without touching
+# wallpapers or signalling anything - which is what the test script drives.
+
+THEME_DIR=${QS_THEME_DIR:-$HOME/.config/theme}
+STATE=${QS_THEME_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/theme}
+BOTTOM_CONFIG=${QS_THEME_BOTTOM:-$HOME/.config/bottom/bottom.toml}
+WALLPAPER=${QS_THEME_WALLPAPER:-$HOME/.local/bin/qs-wallpaper}
+DEFAULT_THEME=doomone
+TAB=$(printf '\t')
+
+usage() {
+    echo "usage: qs-theme set <name> | cycle | list | current | previews
+                    | wallpapers [name] | color <key> [fallback]" >&2
+    exit 2
+}
+
+die() { echo "qs-theme: $*" >&2; exit 1; }
+
+# ── Resolve ──────────────────────────────────────────────────────────────
+# Emit the whole resolved palette for one theme as "key<TAB>value" lines.
+#
+# Values become sed replacement text a moment later, so both sides are charset
+# checked here: a key that is not [A-Za-z0-9_-]+ or a value carrying the sed
+# delimiter, a backslash or an & is dropped with a warning. Dropping it is what
+# leaves a raw {{ }} in the output, which the render step then refuses - far
+# better than quietly writing a broken colour into a live config.
+resolve() {
+    name=$1
+    file=$THEME_DIR/themes/$name/colors.toml
+    [ -r "$file" ] || die "no such theme: $name"
+
+    awk -v theme="$name" '
+      BEGIN { HEX = "0123456789abcdef" }
+
+      # ── hex arithmetic ──────────────────────────────────────────────
+      function hv(c,   i) { i = index(HEX, tolower(c)); return i - 1 }
+      function comp(h, i,   s) {
+          s = substr(h, 2 + 2 * i, 2)
+          return hv(substr(s, 1, 1)) * 16 + hv(substr(s, 2, 1))
+      }
+      function byte(n) {
+          if (n < 0) n = 0; if (n > 255) n = 255
+          return sprintf("%02x", int(n + 0.5))
+      }
+      # A linear interpolation between two #rrggbb, p of the way from a to b.
+      # Every derived shade in the cascade is one of these.
+      function mix(a, b, p) {
+          return "#" byte(comp(a,0) + (comp(b,0) - comp(a,0)) * p) \
+                     byte(comp(a,1) + (comp(b,1) - comp(a,1)) * p) \
+                     byte(comp(a,2) + (comp(b,2) - comp(a,2)) * p)
+      }
+
+      function have(k) { return (k in A) && A[k] != "" }
+      function def(k, v) { if (!have(k)) A[k] = v }
+
+      # ── the file ────────────────────────────────────────────────────
+      # Flat `key = "value"`, line based. Deliberately not a TOML parser:
+      # there are no tables, arrays or multi-line strings in a colors.toml,
+      # and a real parser would be a dependency for nothing.
+      /^[ \t]*#/ { next }
+      /^[ \t]*[A-Za-z0-9_-]+[ \t]*=/ {
+          key = $0; sub(/[ \t]*=.*/, "", key); sub(/^[ \t]+/, "", key)
+          val = $0; sub(/^[^=]*=[ \t]*/, "", val)
+          if (val ~ /^"/) { sub(/^"/, "", val); sub(/".*$/, "", val) }
+          else            { sub(/[ \t]*#.*$/, "", val); sub(/[ \t]+$/, "", val) }
+
+          if (val ~ /[|\\&]/ || val ~ /{{/) {
+              printf "qs-theme: %s: bad character in value for %s, ignored\n",
+                     theme, key > "/dev/stderr"
+              next
+          }
+          A[key] = val
+          next
+      }
+
+      END {
+          A["name"] = theme
+
+          # Authored keys with no sensible derivation. A theme missing one of
+          # these would render a config full of empty colours, so say so.
+          split("background foreground lighter_background muted dim accent " \
+                "accent2 popup_border accents rainbow red green yellow blue " \
+                "magenta cyan", req, " ")
+          missing = ""
+          for (i in req) if (!have(req[i])) missing = missing " " req[i]
+          if (missing != "") {
+              printf "qs-theme: %s: colors.toml is missing:%s\n",
+                     theme, missing > "/dev/stderr"
+              exit 1
+          }
+
+          # ── semantic defaults ────────────────────────────────────────
+          # Ordered: each may feed the next.
+          def("orange",   A["yellow"])       # rose palettes have no orange
+          def("black",    A["background"])   # ANSI 0 and 7 are the terminal
+          def("white",    A["foreground"])   # ends of the same two colours
+          def("inactive", A["dim"])
+          def("critical", A["red"])
+
+          # ── derived shades ───────────────────────────────────────────
+          A["dark_background"]   = mix(A["background"], "#000000", 0.25)
+          A["darker_background"] = mix(A["background"], "#000000", 0.50)
+          split("black red green yellow blue magenta cyan orange foreground white",
+                hue, " ")
+          for (i in hue) A["bright_" hue[i]] = mix(A[hue[i]], "#ffffff", 0.20)
+
+          def("cursor",    A["bright_foreground"])
+          def("selection", A["lighter_background"])
+
+          # ── ANSI aliasing ────────────────────────────────────────────
+          # So the terminal templates can name color0..color15 unconditionally.
+          split("black red green yellow blue magenta cyan white", ansi, " ")
+          for (i = 1; i <= 8; i++) {
+              A["color" (i - 1)] = A[ansi[i]]
+              A["color" (i + 7)] = A["bright_" ansi[i]]
+          }
+
+          # ── mode ─────────────────────────────────────────────────────
+          # An explicit key wins; otherwise the background decides. Nothing
+          # reads this yet - it is what a light theme would switch on.
+          if (!have("mode")) {
+              lum = comp(A["background"],0) + comp(A["background"],1) + comp(A["background"],2)
+              A["mode"] = (lum > 382) ? "light" : "dark"
+          }
+
+          # ── the two byte orders of one translucent background ────────
+          # Qt writes #AARRGGBB, mako wants #RRGGBBAA. Both come from here, so
+          # no consumer has to remember which way round it goes.
+          bare = substr(A["background"], 2)
+          A["overlay"]      = "#f7" bare
+          A["overlay_rgba"] = "#" bare "f7"
+
+          # accents is a space-separated string because it is a list, and a
+          # list is the one thing this flat format cannot hold. The JSON and
+          # TOML consumers want it quoted and comma separated.
+          n = split(A["accents"], acc, " ")
+          json = ""
+          for (i = 1; i <= n; i++) json = json (i > 1 ? ", " : "") "\"" acc[i] "\""
+          A["accents_json"] = json
+
+          # Hyprlang has no #rrggbb literal - it wants rgb(rrggbb) - so every
+          # colour is also published without its hash.
+          for (k in A) keys[++nk] = k
+          for (i = 1; i <= nk; i++)
+              if (A[keys[i]] ~ /^#[0-9a-fA-F]{6}$/)
+                  A[keys[i] "_hex"] = substr(A[keys[i]], 2)
+
+          for (k in A) {
+              if (k !~ /^[A-Za-z0-9_-]+$/) {
+                  printf "qs-theme: %s: bad key %s, ignored\n", theme, k > "/dev/stderr"
+                  continue
+              }
+              printf "%s\t%s\n", k, A[k]
+          }
+      }
+    ' "$file"
+}
+
+# ── Render ───────────────────────────────────────────────────────────────
+# Substitute {{ key }} throughout one template. An unresolved placeholder is a
+# typo'd key, and a config carrying a literal "{{ accent }}" is worse than no
+# config at all, so it is a hard failure rather than a warning.
+render() {
+    tpl=$1
+    out=$2
+    sed -f "$sedscript" "$tpl" > "$out" || die "render failed: $tpl"
+    if grep -q '{{' "$out"; then
+        echo "qs-theme: unresolved placeholders in $(basename "$tpl"):" >&2
+        grep -o '{{[^}]*}}' "$out" | sort -u >&2
+        exit 1
+    fi
+}
+
+# ── Wallpapers ───────────────────────────────────────────────────────────
+# One glob or path per line, # comments and blanks ignored, ~ expanded.
+#
+# IFS is newline only for the loop below: word splitting happens before
+# globbing, so a line with no metacharacters survives whole even when the path
+# has spaces in it, while a glob's matches still each come out as their own
+# field.
+expand_wallpapers() {
+    list=$THEME_DIR/themes/$1/wallpapers
+    [ -r "$list" ] || return 0
+
+    oldifs=$IFS
+    IFS=$(printf '\n')
+    while read -r line; do
+        case $line in ''|\#*) continue ;; esac
+        case $line in "~/"*) line=$HOME/${line#\~/} ;; esac
+        for f in $line; do
+            [ -f "$f" ] && printf '%s\n' "$f"
+        done
+    done < "$list"
+    IFS=$oldifs
+}
+
+# Deal one wallpaper per enabled output, without repeats, through qs-wallpaper -
+# the same path the picker and auto-wall use, so the per-monitor record stays
+# truthful and the bar repaints from it.
+#
+# A theme with no list, or one whose files have all moved, changes the palette
+# and leaves the wallpapers alone. Failing the whole switch over a missing
+# image would be a worse trade.
+deal_wallpapers() {
+    pool=$(expand_wallpapers "$1" | shuf)
+    total=$(printf '%s\n' "$pool" | grep -c .)
+    [ "$total" -gt 0 ] || return 0
+    [ -x "$WALLPAPER" ] || return 0
+
+    outputs=$("$WALLPAPER" list 2>/dev/null |
+              tr ',' '\n' | sed -n 's/.*"name":"\([^"]*\)".*/\1/p')
+    i=0
+    for out in $outputs; do
+        i=$((i + 1))
+        file=$(printf '%s\n' "$pool" | sed -n "$(( (i - 1) % total + 1 ))p")
+        "$WALLPAPER" set "$out" "$file" >/dev/null 2>&1 ||
+            echo "qs-theme: could not set wallpaper on $out" >&2
+    done
+}
+
+# ── Reload ───────────────────────────────────────────────────────────────
+# Every one of these is a no-op when the app is not running, which is every X
+# session and every TTY, so none of them is guarded by a session check.
+# alacritty needs nothing: it watches its own imports.
+reload_consumers() {
+    pkill -USR2 -x ghostty 2>/dev/null
+    command -v hyprctl >/dev/null && hyprctl reload >/dev/null 2>&1
+    command -v makoctl >/dev/null && makoctl reload >/dev/null 2>&1
+    :
+}
+
+# ── Commands ─────────────────────────────────────────────────────────────
+
+# Cycle order is whatever the glob gives, which is alphabetical. That is
+# arbitrary but it is also self-maintaining: adding a theme directory puts it
+# in the rotation with nothing else to edit, and there is exactly one place -
+# here - that decides the order, so a keybind, the bar chip and the IPC handler
+# cannot disagree about what comes next.
+cmd_list() {
+    for d in "$THEME_DIR"/themes/*/; do
+        [ -r "$d/colors.toml" ] && basename "$d"
+    done
+}
+
+# What the picker grid needs, in cycle order:
+#
+#   [{"name":"doomone","preview":"/path/to/a.webp","base":"#282c34",
+#     "accents":["#51afef", ...]}, ...]
+#
+# The preview is the first wallpaper the theme owns - the same rule Omarchy
+# uses, where any image in a theme's backgrounds/ folder represents it because
+# they were all chosen to suit its palette. First rather than random so the
+# tile a theme shows is the same one every time the picker opens.
+#
+# base and accents come along because a theme with no wallpapers still needs a
+# tile, and its own colours are the honest thing to draw there. Resolving them
+# here rather than reading colors.toml in QML keeps the cascade in one place.
+cmd_previews() {
+    printf '['
+    first=1
+    for name in $(cmd_list); do
+        [ "$first" = 1 ] || printf ','
+        first=0
+        preview=$(expand_wallpapers "$name" | head -1)
+        resolve "$name" | awk -F "$TAB" -v name="$name" -v preview="$preview" '
+            $1 == "background"   { bg = $2 }
+            $1 == "accents_json" { acc = $2 }
+            END { printf "{\"name\":\"%s\",\"preview\":\"%s\",\"base\":\"%s\",\"accents\":[%s]}",
+                         name, preview, bg, acc }
+        '
+    done
+    printf ']\n'
+}
+
+cmd_cycle() {
+    now=$(cmd_current)
+    next=$(cmd_list | awk -v now="$now" '
+        { t[NR] = $0; if ($0 == now) at = NR }
+        END { print t[at % NR + 1] }
+    ')
+    [ -n "$next" ] || die "nothing to cycle to"
+    cmd_set "$next"
+}
+
+cmd_current() {
+    name=$(cat "$STATE/theme.name" 2>/dev/null)
+    [ -n "$name" ] && [ -r "$THEME_DIR/themes/$name/colors.toml" ] || name=$DEFAULT_THEME
+    echo "$name"
+}
+
+cmd_color() {
+    key=$1
+    [ -n "$key" ] || usage
+    value=$(resolve "$(cmd_current)" | awk -F "$TAB" -v k="$key" '$1 == k { print $2; exit }')
+    [ -n "$value" ] || value=$2
+    [ -n "$value" ] || return 1
+    echo "$value"
+}
+
+cmd_set() {
+    name=$1
+    [ -n "$name" ] || usage
+    [ -r "$THEME_DIR/themes/$name/colors.toml" ] || die "no such theme: $name"
+
+    work=${TMPDIR:-/tmp}/qs-theme.$$
+    mkdir -p "$work" || exit 1
+    trap 'rm -rf "$work"' EXIT INT TERM
+
+    # Rendered whole into a scratch directory and moved into place only once
+    # every template has come out clean, so a typo in one template cannot
+    # leave half the desktop on the new theme and half on the old.
+    sedscript=$work/subst.sed
+    resolve "$name" |
+        awk -F "$TAB" '{ printf "s|{{ *%s *}}|%s|g\n", $1, $2 }' > "$sedscript" ||
+        exit 1
+    [ -s "$sedscript" ] || die "resolved nothing for $name"
+
+    for tpl in "$THEME_DIR"/templates/*.tpl; do
+        [ -r "$tpl" ] || continue
+        base=$(basename "$tpl" .tpl)
+        render "$tpl" "$work/$base"
+    done
+
+    mkdir -p "$STATE" || exit 1
+    for f in "$work"/*; do
+        case $f in *subst.sed) continue ;; esac
+        mv -- "$f" "$STATE/$(basename "$f")" || exit 1
+    done
+    printf '%s\n' "$name" > "$STATE/theme.name"
+
+    # btm has no include directive and its config is not repo managed, so the
+    # generated file IS the config.
+    if [ -r "$STATE/bottom.toml" ]; then
+        mkdir -p "$(dirname "$BOTTOM_CONFIG")" &&
+            cp -- "$STATE/bottom.toml" "$BOTTOM_CONFIG"
+    fi
+
+    [ "$QS_THEME_DRY" = 1 ] && return 0
+
+    deal_wallpapers "$name"
+    reload_consumers
+}
+
+case $1 in
+    set)     shift; cmd_set "$@" ;;
+    cycle)   cmd_cycle ;;
+    wallpapers) shift; expand_wallpapers "${1:-$(cmd_current)}" ;;
+    previews) cmd_previews ;;
+    list)    cmd_list ;;
+    current) cmd_current ;;
+    color)   shift; cmd_color "$@" ;;
+    *)       usage ;;
+esac
