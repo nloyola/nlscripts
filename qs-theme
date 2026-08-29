@@ -281,6 +281,13 @@ reload_consumers() {
     pkill -USR2 -x ghostty 2>/dev/null
     command -v hyprctl >/dev/null && hyprctl reload >/dev/null 2>&1
     command -v makoctl >/dev/null && makoctl reload >/dev/null 2>&1
+    # Emacs re-reads theme.name itself rather than being handed the name, so
+    # this stays as stateless as the others. -a false is what keeps it a
+    # no-op: with no server running emacsclient runs false and exits instead
+    # of starting an Emacs. A pgrep guard would not do - the binary here is
+    # emacs-pgtk, and the name differs again on the next machine.
+    command -v emacsclient >/dev/null &&
+        emacsclient -a false -e '(nl/qs-theme-sync)' >/dev/null 2>&1
     :
 }
 
