@@ -1,4 +1,19 @@
 #!/usr/bin/env bash
+# Launch alacritty on a random readable dark theme from
+# ~/.config/alacritty/themes/themes, picked fresh for every window.
+#
+# It works by execing the real binary against a generated temp config that
+# imports ~/.config/alacritty/alacritty.toml and then the chosen theme. The
+# theme comes last, so its [colors.*] win over everything the real config
+# pulled in.
+#
+# THAT IS WHY THIS IS NOT CALLED `alacritty` ANY MORE. It used to be, linked
+# over ~/.local/bin/alacritty so it shadowed the real binary and every terminal
+# got a surprise palette. Once the desktop grew a theme system, that made
+# alacritty the one consumer a `qs-theme set` could not reach: the state file
+# ~/.local/state/theme/alacritty-colors.toml was imported and then immediately
+# overridden by the random pick. Plain `alacritty` now follows the theme in
+# force; this is here for when a surprise palette is what you want.
 
 HAS_CONFIG=0
 IS_SUBCOMMAND=0
@@ -22,10 +37,13 @@ MAX_DARK_LUMA=120
 # Themes to exclude from the random rotation (space-separated .toml filenames).
 EXCLUDED_THEMES="falcon.toml high_contrast.toml"
 
-# Locate the real alacritty binary
+# Locate the real alacritty binary. ~/bin is where the cargo build lives on
+# asterix and is not on PATH; anywhere else, PATH is the answer. This used to
+# have to strip ~/.local/bin out of PATH before looking, purely so the wrapper
+# would not find itself - unnecessary now that it no longer takes that name.
 REAL_ALACRITTY="$HOME/bin/alacritty"
 if [ ! -x "$REAL_ALACRITTY" ]; then
-    REAL_ALACRITTY=$(PATH=$(echo "$PATH" | sed -e "s|$HOME/.local/bin||g" -e 's|::|:|g') which alacritty)
+    REAL_ALACRITTY=$(command -v alacritty)
 fi
 
 if [ "$HAS_CONFIG" -eq 1 ] || [ "$IS_SUBCOMMAND" -eq 1 ]; then
