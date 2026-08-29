@@ -1,47 +1,72 @@
 #!/usr/bin/env bash
-# A different random wallpaper on every monitor, and a pywal palette built from
-# the first one. Run from the session autostart - i3/autostart.sh under i3, an
-# exec-once under Hyprland.
+# A different random wallpaper on every monitor at login, dealt from the
+# wallpapers the CURRENT DESKTOP THEME owns. Run from the session autostart -
+# i3/autostart.sh under i3, an exec-once under Hyprland.
 #
-# The dealing lives in qs-wallpaper rather than here: it is the same code path
-# the quickshell display chip uses to set one monitor, so a login and a hand
-# pick agree on which wallpaper is on which output. Doing it with a bare `feh
-# --bg-fill a b` here would leave that record stale and the chip naming files
-# that are no longer on screen. It is also what makes this work under both
-# sessions without a word about either: qs-wallpaper knows which of feh and the
-# quickshell background surfaces paints, and this script never needs to.
+# A theme is a named palette (~/.config/theme) that carries a curated list of
+# wallpapers chosen to suit it, the way an Omarchy theme ships a backgrounds/
+# folder. So the login deal is not "any image under ~/Dropbox/wallpapers" any
+# more: it is that theme's list, and the desktop stays coherent across a
+# reboot instead of pairing a rose palette with whatever turned up.
 #
-# This used to force DISPLAY=:0, because feh and xrandr needed an X server and
-# under i3 that server is always Xorg on :0. Nothing here needs one any more -
-# qs-wallpaper reaches Hyprland over hyprctl - so the only user left is the
-# xrdb at the bottom, and for that a guess is worse than nothing: under
-# Hyprland :0 is whatever Xwayland the compositor started, on a number it
-# picked, and off a session it would be some other server entirely. So take
-# whatever the session exported and no more.
+# The dealing itself lives in qs-wallpaper rather than here: it is the same
+# code path the quickshell display chip and the SUPER+SHIFT+W picker use to set
+# one monitor, so a login and a hand pick agree on which wallpaper is on which
+# output. Doing it with a bare `feh --bg-fill a b` here would leave that record
+# stale and the chip naming files that are no longer on screen. It is also what
+# makes this work under both sessions without a word about either: qs-wallpaper
+# knows which of feh and the quickshell background surfaces paints, and this
+# script never needs to.
+#
+# WHY NOT JUST `qs-theme set <current>`: that would re-render every config and
+# reload every app at login for a palette that has not changed. The generated
+# files in ~/.local/state/theme survive a reboot, so at login the only thing
+# left to do is deal.
+#
+# This used to end by building a pywal palette from the first wallpaper. That
+# branch is gone: nothing is derived from an image any more (the theme decides
+# the colours and the wallpaper follows), and `wal` was never installed here,
+# so it had been dead code guarded by a `command -v` for its whole life.
 
-WALLPAPER="$HOME/.local/bin/qs-wallpaper"
+THEME=${QS_THEME_BIN:-$HOME/.local/bin/qs-theme}
+WALLPAPER=${QS_WALLPAPER_BIN:-$HOME/.local/bin/qs-wallpaper}
+THEME_DIR=${QS_THEME_DIR:-$HOME/.config/theme}
 
-# One "<output>\t<file>" line per monitor. Under i3 the wallpapers are on screen
-# by the time this returns; under Hyprland the record is written and the bar
-# repaints from it a moment later.
-dealt=$("$WALLPAPER" random "$HOME/Dropbox/wallpapers" "$HOME/wallpapers") || exit 1
+name=$("$THEME" current 2>/dev/null)
+list=$THEME_DIR/themes/$name/wallpapers
 
-# Colours come from the first monitor's wallpaper. -n so wal leaves the
-# background alone: qs-wallpaper has already set it, per monitor, and wal would
-# stretch this one image across both.
-wall1=$(printf '%s\n' "$dealt" | head -1 | cut -f2)
-[ -n "$wall1" ] || exit 0
-
-# pywal is not installed everywhere this runs. Without the guard the merge
-# below would quietly re-apply a months-old palette from the cache.
-command -v wal >/dev/null || exit 0
-
-wal --backend colorz -n -i "$wall1"
-
-# Apply updated colors. Worth doing in both sessions - XWayland clients read
-# Xresources under Hyprland exactly as X11 clients do under i3 - but only when
-# a server is actually answering, otherwise this is one "unable to open
-# display" line in the session log at every login.
-if [ -n "$DISPLAY" ] && command -v xrdb >/dev/null; then
-    xrdb -merge ~/.cache/wal/colors.Xresources
+# The pool: one glob or path per line, # comments and blanks ignored, ~
+# expanded. IFS is newline only so a path with spaces in it survives a line
+# with no glob characters, while a glob's matches still come out as separate
+# words.
+pool=()
+if [ -r "$list" ]; then
+    while IFS= read -r line; do
+        case $line in ''|\#*) continue ;; esac
+        case $line in "~/"*) line=$HOME/${line#\~/} ;; esac
+        for f in $line; do
+            [ -f "$f" ] && pool+=("$f")
+        done
+    done < "$list"
 fi
+
+# No theme list, or every file in it has moved: leave the wallpapers alone
+# rather than dealing something off-theme. The remembered ones are already on
+# screen (X11 restores them from ~/.fehbg, Wayland from the state file).
+[ ${#pool[@]} -gt 0 ] || exit 0
+
+# Shuffled once and dealt out, so two monitors never land on the same image
+# unless the theme's list holds fewer than there are monitors.
+mapfile -t shuffled < <(printf '%s\n' "${pool[@]}" | shuf)
+
+# One name per enabled monitor, in the compositor's own order. qs-wallpaper is
+# the only thing here that knows how to ask - xrandr under X11, hyprctl under
+# Hyprland - so its `list` output is what supplies them.
+mapfile -t outputs < <("$WALLPAPER" list 2>/dev/null |
+                       tr ',' '\n' | sed -n 's/.*"name":"\([^"]*\)".*/\1/p')
+
+i=0
+for out in "${outputs[@]}"; do
+    "$WALLPAPER" set "$out" "${shuffled[i % ${#shuffled[@]}]}" >/dev/null || exit 1
+    i=$((i + 1))
+done
