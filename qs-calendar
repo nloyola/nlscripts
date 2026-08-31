@@ -1,0 +1,431 @@
+#!/usr/bin/env python3
+"""Google Calendar events for the quickshell clock popup.
+
+Emits one JSON document on stdout:
+
+    {"from": "2026-08-01", "to": "2026-10-05",
+     "events": [{id, title, allDay, start, end, startDate, endDate,
+                 color, declined, location, conference, joinUrl,
+                 htmlLink, calendar}],
+     "error": null}
+
+`error` is a human-readable string on every failure path and `events` is then
+empty, so the bar degrades to a plain month grid instead of blanking - the same
+contract qs-weather and qs-agent-usage keep.
+
+WHY NOT `gcalcli agenda --tsv`: the TSV has no per-event colour and no
+attendee response, so the coloured day dots and the struck-through declined
+rows the popup draws could not be built from it. This talks to the Calendar
+REST API directly and gets the whole event resource.
+
+AUTH: gcalcli owns the OAuth dance - run `gcalcli init` once and it writes a
+pickled google.oauth2.credentials.Credentials to ~/.local/share/gcalcli/oauth.
+This script only reads that file, so there is one token, one consent screen and
+one place to revoke. Unpickling it needs google-auth on the path, which is why
+~/.local/bin/qs-calendar is a nix wrapper around a python that has it rather
+than a plain symlink into this checkout like its qs-* neighbours (see
+nix/qs-calendar.nix).
+
+The refreshed access token is cached in $XDG_CACHE_HOME/qs-calendar/token.json
+at mode 0600 so a poll every few minutes does not re-hit Google's token
+endpoint. Event payloads are cached beside it for CACHE_TTL seconds, which is
+what makes flicking back and forth through months instant.
+"""
+
+import datetime
+import hashlib
+import json
+import os
+import pickle
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+API = "https://www.googleapis.com/calendar/v3"
+TIMEOUT = 15
+# Event payloads are re-fetched at most this often. The bar polls on a much
+# longer timer; this exists for the burst of identical requests that month
+# navigation produces.
+CACHE_TTL = 60
+# The colour table changes about never, so it is cached for a day.
+COLORS_TTL = 86400
+
+CACHE_DIR = os.path.join(
+    os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"),
+    "qs-calendar",
+)
+
+# Fallback palette for a calendar that reports no colour at all. Google's own
+# event palette, so a dot drawn from it does not look foreign next to the rest.
+FALLBACK_COLORS = [
+    "#a4bdfc", "#7ae7bf", "#dbadff", "#ff887c", "#fbd75b",
+    "#ffb878", "#46d6db", "#e1e1e1", "#5484ed", "#51b749", "#dc2127",
+]
+
+
+def die(msg):
+    """Emit the empty-but-well-formed document and stop."""
+    json.dump({"from": None, "to": None, "events": [], "error": msg},
+              sys.stdout)
+    sys.stdout.write("\n")
+    sys.exit(0)
+
+
+# ── Credentials ────────────────────────────────────────────────────────────
+
+def oauth_path():
+    """Where gcalcli keeps its token, preferred path first.
+
+    Mirrors gcalcli/env.py: the platformdirs data dir, with the pre-4.x
+    ~/.gcalcli_oauth as a fallback for a home directory that was never
+    migrated.
+    """
+    data_home = (os.environ.get("XDG_DATA_HOME")
+                 or os.path.expanduser("~/.local/share"))
+    candidates = [
+        os.path.join(data_home, "gcalcli", "oauth"),
+        os.path.expanduser("~/.gcalcli_oauth"),
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def load_credentials():
+    """Return (client_id, client_secret, refresh_token, token_uri).
+
+    google-auth is imported lazily and only for the unpickle: everything after
+    this point is plain urllib, so a missing library is reported as a setup
+    problem rather than crashing on import.
+    """
+    path = oauth_path()
+    if not path:
+        die("Not authenticated - run `gcalcli init`")
+
+    try:
+        import google.oauth2.credentials  # noqa: F401  (unpickle needs it)
+    except ImportError:
+        die("google-auth is missing - run `home-manager switch`")
+
+    try:
+        with open(path, "rb") as fh:
+            creds = pickle.load(fh)
+    except Exception as e:
+        die("Cannot read gcalcli credentials (%s) - run `gcalcli init`"
+            % type(e).__name__)
+
+    refresh = getattr(creds, "refresh_token", None)
+    client_id = getattr(creds, "client_id", None)
+    secret = getattr(creds, "client_secret", None)
+    if not (refresh and client_id and secret):
+        die("gcalcli credentials are incomplete - run `gcalcli init`")
+
+    uri = getattr(creds, "token_uri", None) or "https://oauth2.googleapis.com/token"
+    return client_id, secret, refresh, uri
+
+
+def access_token():
+    """A valid bearer token, from the cache when one is still good.
+
+    The cache file is written 0600 and its contents are never printed - the
+    only consumer is the Authorization header built below.
+    """
+    cached = read_cache("token.json", ttl=None)
+    if cached and cached.get("expires_at", 0) > time.time() + 60:
+        return cached["token"]
+
+    client_id, secret, refresh, uri = load_credentials()
+    body = urllib.parse.urlencode({
+        "client_id": client_id,
+        "client_secret": secret,
+        "refresh_token": refresh,
+        "grant_type": "refresh_token",
+    }).encode()
+
+    try:
+        req = urllib.request.Request(uri, data=body, method="POST")
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+            payload = json.load(resp)
+    except urllib.error.HTTPError:
+        # A refresh token is revoked, expired or belongs to a deleted OAuth
+        # client. Nothing here can recover from that.
+        die("Authorization expired - run `gcalcli init`")
+    except Exception:
+        die("Offline")
+
+    token = payload.get("access_token")
+    if not token:
+        die("Authorization expired - run `gcalcli init`")
+
+    write_cache("token.json", {
+        "token": token,
+        "expires_at": time.time() + int(payload.get("expires_in", 3600)),
+    })
+    return token
+
+
+# ── Cache ──────────────────────────────────────────────────────────────────
+
+def read_cache(name, ttl):
+    """Cached JSON, or None when absent, unreadable or past `ttl` seconds."""
+    path = os.path.join(CACHE_DIR, name)
+    try:
+        if ttl is not None and time.time() - os.path.getmtime(path) > ttl:
+            return None
+        with open(path) as fh:
+            return json.load(fh)
+    except Exception:
+        return None
+
+
+def write_cache(name, data):
+    """Best-effort cache write. A read-only cache dir must not fail a poll.
+
+    Everything here is 0600 in a 0700 directory, not just the token: the event
+    payloads carry meeting titles, attendees' venues and conference links, which
+    are no more anyone else's business than the token is.
+    """
+    path = os.path.join(CACHE_DIR, name)
+    try:
+        os.makedirs(CACHE_DIR, mode=0o700, exist_ok=True)
+        tmp = path + ".tmp"
+        # Mode is set at open(), not chmod'ed afterwards, so the file is never
+        # briefly readable by anyone else.
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        fd = os.open(tmp, flags, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            json.dump(data, fh)
+        os.replace(tmp, path)
+    except Exception:
+        pass
+
+
+# ── API ────────────────────────────────────────────────────────────────────
+
+def get(path, token, **params):
+    """One GET against the Calendar API, following pagination."""
+    items = []
+    page = None
+    while True:
+        if page:
+            params["pageToken"] = page
+        url = "%s%s?%s" % (API, path, urllib.parse.urlencode(params))
+        req = urllib.request.Request(url, headers={
+            "Authorization": "Bearer " + token,
+        })
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+            payload = json.load(resp)
+        if "items" not in payload:
+            return payload
+        items.extend(payload["items"])
+        page = payload.get("nextPageToken")
+        if not page:
+            return {"items": items}
+
+
+def color_table(token):
+    """Google's numbered palettes: {"event": {...}, "calendar": {...}}."""
+    cached = read_cache("colors.json", ttl=COLORS_TTL)
+    if cached:
+        return cached
+    payload = get("/colors", token)
+    table = {
+        "event": {k: v.get("background")
+                  for k, v in (payload.get("event") or {}).items()},
+        "calendar": {k: v.get("background")
+                     for k, v in (payload.get("calendar") or {}).items()},
+    }
+    write_cache("colors.json", table)
+    return table
+
+
+# ── Event shaping ──────────────────────────────────────────────────────────
+
+def parse_stamp(node):
+    """(iso local naive string, date string, is_all_day) for a start/end node.
+
+    An all-day event carries `date`; a timed one carries `dateTime` with an
+    offset that is not necessarily this machine's, so it is converted rather
+    than truncated.
+    """
+    if node.get("date"):
+        return node["date"] + "T00:00:00", node["date"], True
+    raw = node.get("dateTime")
+    if not raw:
+        return None, None, False
+    try:
+        stamp = datetime.datetime.fromisoformat(raw)
+    except ValueError:
+        return None, None, False
+    if stamp.tzinfo is not None:
+        stamp = stamp.astimezone().replace(tzinfo=None)
+    return stamp.isoformat(timespec="seconds"), stamp.date().isoformat(), False
+
+
+def declined(event):
+    """True when this account has declined its own invitation."""
+    for attendee in event.get("attendees") or []:
+        if attendee.get("self") and attendee.get("responseStatus") == "declined":
+            return True
+    return False
+
+
+def conference(event):
+    """(short label, join url) for a video-conference event, else ("", "")."""
+    url = event.get("hangoutLink") or ""
+    data = event.get("conferenceData") or {}
+    if not url:
+        for entry in data.get("entryPoints") or []:
+            if entry.get("entryPointType") == "video" and entry.get("uri"):
+                url = entry["uri"]
+                break
+    if not url:
+        return "", ""
+    solution = ((data.get("conferenceSolution") or {}).get("name") or "").strip()
+    # "Google Meet" is the common case and the column is narrow, so the vendor
+    # prefix goes.
+    label = solution.replace("Google ", "") or "Video"
+    return label, url
+
+
+def shape(event, calendar, colors, fallback):
+    start, start_date, all_day = parse_stamp(event.get("start") or {})
+    end, end_date, _ = parse_stamp(event.get("end") or {})
+    if not start:
+        return None
+
+    # Google reports an all-day end as the first day AFTER the event, which
+    # would paint a dot on a day the event does not touch.
+    if all_day and end_date:
+        last = datetime.date.fromisoformat(end_date) - datetime.timedelta(days=1)
+        end_date = max(last.isoformat(), start_date)
+
+    color = (colors["event"].get(event.get("colorId"))
+             or calendar.get("backgroundColor")
+             or colors["calendar"].get(calendar.get("colorId"))
+             or fallback)
+
+    label, join = conference(event)
+    return {
+        "id": event.get("id", ""),
+        "title": (event.get("summary") or "(no title)").strip(),
+        "allDay": all_day,
+        "start": start,
+        "end": end or start,
+        "startDate": start_date,
+        "endDate": end_date or start_date,
+        "color": color,
+        "declined": declined(event),
+        "location": (event.get("location") or "").strip(),
+        "conference": label,
+        "joinUrl": join,
+        "htmlLink": event.get("htmlLink") or "",
+        "calendar": calendar.get("summary") or calendar.get("id") or "",
+    }
+
+
+# ── Main ───────────────────────────────────────────────────────────────────
+
+def date_arg(value, name):
+    try:
+        return datetime.date.fromisoformat(value)
+    except ValueError:
+        die("Bad --%s date: %s" % (name, value))
+
+
+def parse_args(argv):
+    """--from and --to, defaulting to a window around today."""
+    today = datetime.date.today()
+    start = today.replace(day=1) - datetime.timedelta(days=31)
+    end = today + datetime.timedelta(days=120)
+    i = 0
+    while i < len(argv):
+        if argv[i] == "--from" and i + 1 < len(argv):
+            start = date_arg(argv[i + 1], "from")
+        elif argv[i] == "--to" and i + 1 < len(argv):
+            end = date_arg(argv[i + 1], "to")
+        else:
+            die("Unknown argument: %s" % argv[i])
+        i += 2
+    if end < start:
+        die("--to is before --from")
+    return start, end
+
+
+def main():
+    start, end = parse_args(sys.argv[1:])
+    key = hashlib.sha256(("%s..%s" % (start, end)).encode()).hexdigest()[:16]
+    cache_name = "events-%s.json" % key
+
+    cached = read_cache(cache_name, ttl=CACHE_TTL)
+    if cached:
+        json.dump(cached, sys.stdout)
+        sys.stdout.write("\n")
+        return
+
+    token = access_token()
+    colors = color_table(token)
+
+    try:
+        calendars = get("/users/me/calendarList", token,
+                        minAccessRole="reader").get("items") or []
+    except Exception:
+        die("Offline")
+
+    # Only the calendars actually ticked in the Google UI, so the bar shows
+    # what the web app shows.
+    calendars = [c for c in calendars
+                 if c.get("selected") and not c.get("deleted")]
+
+    # Google wants RFC3339 instants. Local midnight either side keeps the
+    # window aligned with the days the grid draws.
+    tz = datetime.datetime.now().astimezone().tzinfo
+    time_min = datetime.datetime.combine(start, datetime.time.min, tz)
+    time_max = datetime.datetime.combine(end + datetime.timedelta(days=1),
+                                         datetime.time.min, tz)
+
+    events = []
+    for index, calendar in enumerate(calendars):
+        fallback = FALLBACK_COLORS[index % len(FALLBACK_COLORS)]
+        try:
+            items = get("/calendars/%s/events"
+                        % urllib.parse.quote(calendar["id"], safe=""),
+                        token,
+                        timeMin=time_min.isoformat(),
+                        timeMax=time_max.isoformat(),
+                        singleEvents="true",
+                        orderBy="startTime",
+                        maxResults=2500).get("items") or []
+        except Exception:
+            # One unreadable calendar must not lose the others.
+            continue
+        for item in items:
+            if item.get("status") == "cancelled":
+                continue
+            shaped = shape(item, calendar, colors, fallback)
+            if shaped:
+                events.append(shaped)
+
+    # All-day events first within a day, then by start, so the agenda reads the
+    # way the Google UI does.
+    events.sort(key=lambda e: (e["startDate"], not e["allDay"], e["start"]))
+
+    payload = {
+        "from": start.isoformat(),
+        "to": end.isoformat(),
+        "events": events,
+        "error": None,
+    }
+    write_cache(cache_name, payload)
+    json.dump(payload, sys.stdout)
+    sys.stdout.write("\n")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        die("%s: %s" % (type(e).__name__, e))
