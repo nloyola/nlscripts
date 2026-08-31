@@ -52,8 +52,12 @@ lock_session() {
 	fi
 }
 
+# qs-dmenu draws on the quickshell command menu in the Hyprland session and
+# falls back to `rofi -dmenu` everywhere else - under i3, under sway, and under
+# Hyprland with the bar down. Nothing here branches on the session; the script
+# decides, so this one menu still serves all three.
 CHOSEN=$(printf '%s\n' "$LOCK" "$SUSPEND" "$LOGOUT" "$REBOOT" "$SHUTDOWN" |
-	rofi -dmenu -i -p "Power" -lines 5)
+	qs-dmenu -p "Power" -- -lines 5)
 
 # Empty means the menu was dismissed, which is not an error.
 [ -n "$CHOSEN" ] || exit 0

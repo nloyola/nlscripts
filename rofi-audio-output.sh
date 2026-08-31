@@ -29,7 +29,9 @@ else
         choices+=("$(echo "$x" | xargs)")
     done
 
-    # Show choices in rofi
-    selection=$(printf '%s\n' "${choices[@]}" | rofi -dmenu -p "Audio Output")
+    # The quickshell command menu where there is one, rofi everywhere else;
+    # qs-dmenu picks. The name stays rofi-audio-output.sh: it is called by that
+    # name from the Hyprland binding and from the menu tree.
+    selection=$(printf '%s\n' "${choices[@]}" | qs-dmenu -p "Audio Output")
     [ -n "$selection" ] && "$0" "$selection"
 fi
