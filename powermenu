@@ -1,8 +1,7 @@
 #!/usr/bin/env sh
 
-# Power menu for the $mod+P binding, shared by the i3, sway and Hyprland
-# sessions (i3/config, sway/config, hypr/hyprland.conf) and by polybar's
-# powermenu module.
+# Power menu for the $mod+P binding, shared by the i3 and Hyprland sessions
+# (i3/config, hypr/hyprland.conf) and by polybar's powermenu module.
 #
 # Each session locks and exits with its own tools, so the compositor is
 # detected at runtime rather than assumed. The previous version assumed i3:
@@ -28,23 +27,20 @@ REBOOT="󰜉  Restart"
 SHUTDOWN="󰐥  Power off"
 
 # Locker and session-exit command per compositor. HYPRLAND_INSTANCE_SIGNATURE
-# and SWAYSOCK are set by the compositors themselves, so this holds for a
-# session started any way; i3 is the remaining X11 case. The lock colour is
-# the one the $mod+Escape bindings in i3/config and sway/config already use.
+# is set by Hyprland itself, so this holds for a session started any way; i3 is
+# the remaining case, and the only other session this repo still ships. The
+# lock colour is the one the $mod+Escape binding in i3/config already uses.
 if [ -n "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]; then
 	locker="hyprlock"
 	exit_session="hyprctl dispatch exit"
-elif [ -n "${SWAYSOCK:-}" ]; then
-	locker="swaylock -c 282c34"
-	exit_session="swaymsg exit"
 else
 	locker="i3lock -c 282c34"
 	exit_session="i3-msg exit"
 fi
 
 lock_session() {
-	# Fall back to logind rather than leaving the screen unlocked: swaylock in
-	# particular is not installed on every host this script is deployed to.
+	# Fall back to logind rather than leaving the screen unlocked: neither
+	# locker is installed on every host this script is deployed to.
 	if command -v "${locker%% *}" >/dev/null 2>&1; then
 		$locker
 	else
@@ -53,9 +49,9 @@ lock_session() {
 }
 
 # qs-dmenu draws on the quickshell command menu in the Hyprland session and
-# falls back to `rofi -dmenu` everywhere else - under i3, under sway, and under
-# Hyprland with the bar down. Nothing here branches on the session; the script
-# decides, so this one menu still serves all three.
+# falls back to `rofi -dmenu` everywhere else - under i3, and under Hyprland
+# with the bar down. Nothing here branches on the session; the script decides,
+# so this one menu still serves both.
 CHOSEN=$(printf '%s\n' "$LOCK" "$SUSPEND" "$LOGOUT" "$REBOOT" "$SHUTDOWN" |
 	qs-dmenu -p "Power" -- -lines 5)
 

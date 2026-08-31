@@ -24,7 +24,7 @@
 #
 # THE FALLBACK IS LOAD-BEARING. The quickshell menu lives inside the bar
 # process, so `qs ipc call` does nothing at all when the bar is down, and the
-# i3 and sway sessions never had one. Every failure to reach it - no `qs` on
+# i3 session never had one. Every failure to reach it - no `qs` on
 # PATH, no instance, no menu target, the call itself erroring - runs rofi with
 # the same stdin, so no caller has to branch on the session. This is the same
 # invariant hypr/hyprland.conf records for $mod+CTRL+SPACE.
