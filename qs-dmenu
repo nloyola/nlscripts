@@ -1,0 +1,165 @@
+#!/usr/bin/env bash
+#
+# A dmenu that draws on the quickshell command menu, with rofi as the fallback.
+#
+#   printf '%s\n' "${rows[@]}" | qs-dmenu -p "Power" [--width 520] [--input]
+#                                          [--font "JetBrainsMono Nerd Font Mono"]
+#                                          [-- <rofi args, fallback path only>]
+#
+# Rows in on stdin, the chosen row out on stdout, exit 1 when dismissed - the
+# dmenu contract, so a caller swaps `rofi -dmenu` for this and changes nothing
+# else. Exit statuses:
+#
+#    0  a row was chosen; it is on stdout
+#    1  dismissed (Escape), or nothing to choose from
+#   10  the user asked to go BACK: Backspace or Left on an empty filter. Only
+#       the quickshell path can produce this - the menu has a route tree and
+#       rofi does not - and a caller that has nowhere to go back to can treat
+#       it exactly like 1. See menu/Menu.qml finishBack().
+#    2  a usage or environment error
+#
+# A row may be plain text, or "<glyph>\t<label>" or
+# "<glyph>\t<label>\t<subtext>": the menu drops the glyph from the result and
+# draws the subtext under the label. See menu/Menu.qml rebuildDmenuDisplay().
+#
+# THE FALLBACK IS LOAD-BEARING. The quickshell menu lives inside the bar
+# process, so `qs ipc call` does nothing at all when the bar is down, and the
+# i3 and sway sessions never had one. Every failure to reach it - no `qs` on
+# PATH, no instance, no menu target, the call itself erroring - runs rofi with
+# the same stdin, so no caller has to branch on the session. This is the same
+# invariant hypr/hyprland.conf records for $mod+CTRL+SPACE.
+#
+# `--probe` exits 0 when the quickshell path would be taken and 1 when it would
+# not, for the one caller that has to render its rows differently for each
+# (~/.config/rofi/cheatsheets.sh, which draws pango for rofi).
+
+set -uo pipefail
+
+prompt=""
+mode="select"
+width=420
+max_height=0
+font=""
+probe_only=0
+rofi_args=()
+
+die() { echo "qs-dmenu: $1" >&2; exit 2; }
+
+while [ $# -gt 0 ]; do
+	case "$1" in
+		-p|--prompt) prompt=${2-}; shift 2 ;;
+		--width)     width=${2-}; shift 2 ;;
+		--max-height) max_height=${2-}; shift 2 ;;
+		# The family the menu draws this surface in, for a caller whose rows
+		# are a padded column and only line up in a monospace one. shell.qml
+		# puts the menu's own family back when the surface closes.
+		--font)      font=${2-}; shift 2 ;;
+		--input)     mode="input"; shift ;;
+		--probe)     probe_only=1; shift ;;
+		# Everything after "--" is passed straight to rofi on the fallback
+		# path and ignored by the menu, for a caller that needs rofi to look
+		# a particular way (-lines, -theme-str, -markup-rows).
+		--)          shift; rofi_args=("$@"); break ;;
+		-h|--help)   sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+		*)           die "unknown option: $1" ;;
+	esac
+done
+
+# The menu target is published by shell.qml only while the bar is running, so
+# this answers "is there a quickshell menu to draw on" without opening anything
+# or reloading the menu tree.
+menu_available() {
+	command -v qs >/dev/null 2>&1 || return 1
+	qs ipc show 2>/dev/null | grep -q '^target menu$'
+}
+
+[ "$probe_only" = 1 ] && { menu_available; exit $?; }
+
+# rofi keeps -i (case-insensitive) and the prompt; everything else about how it
+# looks stays in ~/.config/rofi. In input mode there is no list to show: rofi
+# has no input-only mode, and an empty list with -no-custom left off is the
+# same thing, since whatever is typed comes back.
+#
+# Not `exec`: this is always called as the tail of a pipeline, where exec would
+# only replace the subshell and let the script carry on past it.
+run_rofi() {
+	if [ "$mode" = input ]; then
+		: | rofi -dmenu -i -p "${prompt:-Select}" "${rofi_args[@]}"
+	else
+		printf '%s\n' "${options[@]}" | rofi -dmenu -i -p "${prompt:-Select}" "${rofi_args[@]}"
+	fi
+	exit $?
+}
+
+# Read the rows before probing, so both paths have them: stdin can only be
+# consumed once, and the fallback needs the same list.
+options=()
+if [ "$mode" = select ]; then
+	while IFS= read -r line; do options+=("$line"); done
+	[ ${#options[@]} -gt 0 ] || exit 1
+fi
+
+menu_available || run_rofi
+
+# Only the quickshell path needs jq, so this is checked after the fallback:
+# a host without jq must still get its rofi menu.
+command -v jq >/dev/null 2>&1 || die "jq is not installed"
+
+runtime=${XDG_RUNTIME_DIR:-/tmp}
+work=$(mktemp -d "$runtime/qs-dmenu.XXXXXX") || die "cannot create a work directory"
+trap 'rm -rf "$work"' EXIT INT TERM
+selection_file=$work/selection
+done_file=$work/done
+
+# jq builds the JSON, so a row holding a quote, a backslash or a tab cannot
+# break out of the payload. `[inputs]` reads the rows as raw lines; in input
+# mode there are none.
+payload=$(
+	if [ "$mode" = select ]; then printf '%s\n' "${options[@]}"; fi \
+		| jq -Rn \
+			--arg prompt "${prompt:-Select}" \
+			--arg mode "$mode" \
+			--arg fontFamily "$font" \
+			--arg selectionFile "$selection_file" \
+			--arg doneFile "$done_file" \
+			--argjson width "$width" \
+			--argjson maxHeight "$max_height" \
+			'{prompt: $prompt, mode: $mode, selectionFile: $selectionFile,
+			  doneFile: $doneFile, width: $width, maxHeight: $maxHeight,
+			  options: [inputs]}
+			 | if $fontFamily == "" then . else . + {fontFamily: $fontFamily} end'
+) || die "cannot build the payload"
+
+if ! qs ipc call menu dmenu "$payload" >/dev/null 2>&1; then
+	# The instance went away between the probe and the call.
+	run_rofi
+fi
+
+# Menu.qml touches the done file whether a row was picked or the surface was
+# dismissed, so this blocks on the file rather than on a process. Wait on it
+# with inotify where that exists and poll otherwise, and give up eventually:
+# a quickshell killed mid-prompt writes nothing at all, and hanging a caller
+# that was launched from a keybinding leaves an invisible process behind.
+timeout=${QS_DMENU_TIMEOUT:-300}
+have_inotify=0
+command -v inotifywait >/dev/null 2>&1 && have_inotify=1
+
+SECONDS=0
+while [ ! -e "$done_file" ]; do
+	[ "$SECONDS" -ge "$timeout" ] && exit 1
+	if [ "$have_inotify" = 1 ]; then
+		# Bounded, so the window between the test above and the watch going
+		# on cannot swallow the event for good.
+		inotifywait -qq -t 5 -e create,moved_to,close_write "$work" >/dev/null 2>&1
+	else
+		sleep 0.2
+	fi
+done
+
+# The done file says how the surface ended: empty for a dismissal, "back" when
+# the user asked to step back to whatever opened it.
+[ "$(head -1 "$done_file" 2>/dev/null)" = back ] && exit 10
+
+# A dismissal touches the done file and never writes a selection.
+[ -s "$selection_file" ] || exit 1
+cat "$selection_file"
