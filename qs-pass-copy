@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+#
+# Pick an entry from the pass store and copy it to the clipboard. Behind the
+# Passwords row of the quickshell command menu ($mod+SPACE), which used to hand
+# off to rofi-pass.
+#
+# This script never sees a password. It lists entry NAMES - the paths of the
+# *.gpg files under the store, with the prefix and the suffix stripped - and
+# hands the chosen one to `pass -c`, which does the decryption itself, puts the
+# first line on the clipboard with wl-copy (or xclip on X11), and clears it
+# again after CLIP_TIME. There is no code path here that reads a store file, so
+# there is none that could print one.
+#
+# Deliberately NOT rofi-pass parity. rofi-pass drives sixteen actions off
+# rofi's -kb-custom-1..16 exit codes (autotype, type user/pass/OTP, open URL,
+# copy name/url, show, insert, generate, QR, switch store); the quickshell
+# dmenu returns one selected string and has no channel for "which key fired",
+# so parity would mean extending the payload contract and forking a
+# third-party script. $mod+SHIFT+P still runs the full rofi-pass. This row does
+# the one action that covers ordinary use.
+
+set -uo pipefail
+
+store=${PASSWORD_STORE_DIR:-$HOME/.password-store}
+clip_time=${PASSWORD_STORE_CLIP_TIME:-45}
+
+notify() {
+	command -v notify-send >/dev/null 2>&1 && notify-send -t 4000 -u low "$@"
+}
+
+command -v pass >/dev/null 2>&1 || { echo "pass is not installed" >&2; exit 1; }
+[ -d "$store" ] || { echo "no password store at $store" >&2; exit 1; }
+
+# Names only. -mindepth 1 keeps the store root itself out; .gpg-id and the git
+# metadata are not *.gpg and never match.
+entries=$(cd "$store" && find . -mindepth 1 -name '*.gpg' -type f -printf '%P\n' 2>/dev/null | sed 's/\.gpg$//' | sort)
+[ -n "$entries" ] || { echo "no entries in $store" >&2; exit 1; }
+
+entry=$(printf '%s\n' "$entries" | qs-dmenu -p "Copy password" --width 520) || exit 0
+[ -n "$entry" ] || exit 0
+
+# `pass -c` prints "Copied <entry> to clipboard. Will clear in N seconds." on
+# stdout and the password nowhere - but stdout is discarded regardless, so a
+# future pass cannot start writing anything of interest to a place we forward.
+if pass -c "$entry" >/dev/null 2>&1; then
+	notify "Copied $entry" "Clipboard clears in ${clip_time}s"
+else
+	notify "Could not copy $entry" "pass -c failed - is the key unlocked?"
+	exit 1
+fi
