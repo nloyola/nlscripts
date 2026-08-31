@@ -1,49 +1,108 @@
 #!/bin/sh
-# Compact weather JSON for the quickshell dashboard, from the same
-# wttr.in/Kristianstad source as `weather`. Prints "{}" on any failure so
-# the caller can degrade gracefully.
+# Compact weather JSON for the quickshell dashboard, from Open-Meteo.
+# Open-Meteo is metric by default (degC, km/h, mm) and one call covers the
+# current conditions, an hourly strip and a 7-day list that starts at
+# yesterday. Prints "{}" on any failure so the caller can degrade
+# gracefully.
 
-# Query location and the label shown in the UI. wttr.in reports the
-# nearest weather station (e.g. "Hedentorp"), so we display LABEL instead.
-LOCATION="Kristianstad"
+# Coordinates queried and the label shown in the UI.
+LAT=56.0294
+LON=14.1567
 LABEL="Kristianstad"
 
-curl -s --max-time 15 "wttr.in/${LOCATION}?format=j1" | WX_LABEL="$LABEL" python3 -c '
+URL="https://api.open-meteo.com/v1/forecast?latitude=${LAT}&longitude=${LON}\
+&current=temperature_2m,apparent_temperature,relative_humidity_2m,precipitation,weather_code,wind_speed_10m,wind_direction_10m\
+&hourly=temperature_2m,weather_code,precipitation_probability\
+&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max\
+&timezone=auto&past_days=1&forecast_days=6"
+
+curl -s --max-time 15 "$URL" | WX_LABEL="$LABEL" python3 -c '
 import json, sys, datetime, os
+
+# Open-Meteo reports WMO weather codes and no text, so the description
+# comes from here rather than from the payload.
+WMO = {
+    0: "Clear", 1: "Mainly clear", 2: "Partly cloudy", 3: "Overcast",
+    45: "Fog", 48: "Rime fog",
+    51: "Light drizzle", 53: "Drizzle", 55: "Heavy drizzle",
+    56: "Freezing drizzle", 57: "Freezing drizzle",
+    61: "Light rain", 63: "Rain", 65: "Heavy rain",
+    66: "Freezing rain", 67: "Freezing rain",
+    71: "Light snow", 73: "Snow", 75: "Heavy snow", 77: "Snow grains",
+    80: "Light showers", 81: "Showers", 82: "Violent showers",
+    85: "Snow showers", 86: "Heavy snow showers",
+    95: "Thunderstorm", 96: "Thunderstorm, hail", 99: "Thunderstorm, hail",
+}
+
+POINTS = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
+          "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"]
+
+
+def compass(deg):
+    return POINTS[int((float(deg) % 360) / 22.5 + 0.5) % 16]
+
+
+def num(v, default=0):
+    return default if v is None else v
+
 
 try:
     d = json.load(sys.stdin)
-    cc = d["current_condition"][0]
-    na = d["nearest_area"][0]
+    cur = d["current"]
+    daily = d["daily"]
+    hourly = d["hourly"]
 
-    def dayname(s):
-        y, m, dd = (int(x) for x in s.split("-"))
-        return datetime.date(y, m, dd).strftime("%a")
-
+    # past_days=1 puts yesterday first, so today is index 1 and the rest
+    # of the list runs forward from there - seven rows in all, the most
+    # the dashboard column has room for.
     days = []
-    for day in d["weather"][:4]:
-        hourly = day["hourly"]
-        noon = hourly[4] if len(hourly) > 4 else hourly[0]
+    for i, date in enumerate(daily["time"]):
+        y, m, dd = (int(x) for x in date.split("-"))
         days.append({
-            "date": day["date"],
-            "name": dayname(day["date"]),
-            "min": int(day["mintempC"]),
-            "max": int(day["maxtempC"]),
-            "code": int(noon["weatherCode"]),
-            "desc": noon["weatherDesc"][0]["value"].strip(),
+            "date": date,
+            "name": datetime.date(y, m, dd).strftime("%a"),
+            "full": datetime.date(y, m, dd).strftime("%A"),
+            "min": round(num(daily["temperature_2m_min"][i])),
+            "max": round(num(daily["temperature_2m_max"][i])),
+            "code": int(num(daily["weather_code"][i])),
+            "desc": WMO.get(int(num(daily["weather_code"][i])), "Unknown"),
+            "rain": round(num(daily["precipitation_probability_max"][i])),
+            "yesterday": i == 0,
+            "today": i == 1,
         })
 
+    # The hourly arrays also start at yesterday midnight. Find the current
+    # hour by matching Open-Meteo own "current" timestamp against them, so
+    # the strip always begins at now and never depends on this hosts clock
+    # agreeing with the requested timezone.
+    now = cur["time"][:13]
+    try:
+        start = hourly["time"].index(now + ":00")
+    except ValueError:
+        start = 24
+
+    hours = []
+    for i in range(start, min(start + 24, len(hourly["time"]))):
+        hours.append({
+            "label": hourly["time"][i][11:16],
+            "temp": round(num(hourly["temperature_2m"][i])),
+            "code": int(num(hourly["weather_code"][i])),
+            "rain": round(num(hourly["precipitation_probability"][i])),
+        })
+
+    code = int(num(cur["weather_code"]))
     out = {
-        "area": os.environ.get("WX_LABEL") or na["areaName"][0]["value"],
-        "tempC": int(cc["temp_C"]),
-        "feelsC": int(cc["FeelsLikeC"]),
-        "desc": cc["weatherDesc"][0]["value"].strip(),
-        "code": int(cc["weatherCode"]),
-        "windKmph": int(cc["windspeedKmph"]),
-        "windDir": cc["winddir16Point"],
-        "humidity": int(cc["humidity"]),
-        "precipMM": float(cc["precipMM"]),
+        "area": os.environ.get("WX_LABEL") or "",
+        "tempC": round(num(cur["temperature_2m"])),
+        "feelsC": round(num(cur["apparent_temperature"])),
+        "desc": WMO.get(code, "Unknown"),
+        "code": code,
+        "windKmph": round(num(cur["wind_speed_10m"])),
+        "windDir": compass(num(cur["wind_direction_10m"])),
+        "humidity": round(num(cur["relative_humidity_2m"])),
+        "precipMM": float(num(cur["precipitation"])),
         "days": days,
+        "hours": hours,
     }
     print(json.dumps(out))
 except Exception:
