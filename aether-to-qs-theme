@@ -1,0 +1,213 @@
+#!/bin/sh
+# Aether's extracted palette, as a qs-theme theme.
+#
+#   aether-to-qs-theme [-n name] [-w wallpaper] [colors.toml]
+#
+# Aether (the GUI wallpaper-to-palette extractor) writes a colors.toml that
+# names its keys after Omarchy's theme system. qs-theme reads a colors.toml
+# too, but this desktop's dialect of it, and the two are close enough to look
+# interchangeable and different enough that a plain copy fails: qs-theme exits
+# with "colors.toml is missing: lighter_background dim accent2 popup_border
+# accents rainbow" and renders nothing. This bridges the gap, so a palette
+# pulled off a wallpaper in Aether becomes a theme the picker can deal
+# ($mod+SHIFT+T) and `qs-theme set` can apply.
+#
+# WHY A CONVERTER AND NOT A SECOND SOURCE OF TRUTH. Aether's own output tree
+# (~/.config/aether/theme) holds a rendered alacritty.toml, hyprland.conf,
+# mako.ini and a dozen more - the same files qs-theme renders from its own
+# templates into ~/.local/state/theme. Wiring both into the live configs means
+# two writers racing for the same targets. So only the palette crosses over;
+# everything downstream stays qs-theme's, and Aether is demoted to what it is
+# actually good at, which is picking sixteen colours out of an image.
+#
+# THE FIVE KEYS AETHER DOES NOT EMIT. qs-theme demands sixteen authored keys.
+# Aether supplies eleven of them under its own names; the rest are derived
+# here, and each derivation is a judgement call rather than a fact:
+#
+#   dim                <- aether `muted`, its ANSI-8 comment grey. qs-theme
+#                         feeds dim to `inactive`, which is the same job.
+#   muted              <- that grey mixed 45% toward the foreground. qs-theme's
+#                         muted is secondary text and sits lighter than dim;
+#                         Aether has no separate key for it.
+#   accent2            <- `magenta`, following doomone, where accent is the
+#                         blue and accent2 the magenta beside it.
+#   popup_border       <- the accent lifted 45% toward white, standing in for
+#                         the light hairline doomone authors by hand.
+#   accents            <- blue magenta green orange cyan, doomone's rotation
+#                         order, so the bar cycles hues rather than shades.
+#   rainbow            <- false. Only `colorful` sets it.
+#
+# and `lighter_bg` is simply qs-theme's `lighter_background` under another
+# name. Everything else - red green yellow blue magenta cyan orange, and both
+# primaries - is a straight copy.
+#
+# The wallpaper is COPIED out of Aether's tree, not referenced in place:
+# ~/.config/aether/theme/backgrounds is overwritten by the next Apply Theme,
+# which would silently repoint an existing theme at someone else's picture.
+#
+# QS_THEME_DIR relocates the theme directory (same variable qs-theme reads),
+# AETHER_DIR the Aether output tree, and QS_THEME_WALLPAPER_LIB the wallpaper
+# library the picture is copied into.
+
+THEME_DIR=${QS_THEME_DIR:-$HOME/.config/theme}
+AETHER_DIR=${AETHER_DIR:-$HOME/.config/aether/theme}
+WALLPAPER_LIB=${QS_THEME_WALLPAPER_LIB:-$HOME/Dropbox/wallpapers/aether}
+
+name=aether
+wallpaper=
+source=
+
+usage() {
+    echo "usage: aether-to-qs-theme [-n name] [-w wallpaper] [colors.toml]" >&2
+    exit 2
+}
+
+die() { echo "aether-to-qs-theme: $*" >&2; exit 1; }
+
+while getopts n:w:h opt; do
+    case $opt in
+        n) name=$OPTARG ;;
+        w) wallpaper=$OPTARG ;;
+        *) usage ;;
+    esac
+done
+shift $((OPTIND - 1))
+[ $# -gt 1 ] && usage
+source=${1:-$AETHER_DIR/colors.toml}
+
+# A theme name becomes a directory, a card basename and a sed replacement
+# downstream, so keep it to what all three survive.
+case $name in
+    *[!A-Za-z0-9_-]*|"") die "bad theme name: $name" ;;
+esac
+
+[ -r "$source" ] || die "no palette at $source - run Apply Theme in Aether first"
+
+# The wallpaper: whatever -w says, else the one Aether copied beside the
+# palette. A theme with no wallpaper is allowed (qs-theme keeps what is on
+# screen), so this is not fatal.
+if [ -z "$wallpaper" ]; then
+    wallpaper=$(find "$AETHER_DIR/backgrounds" -maxdepth 1 -type f 2>/dev/null |
+                sort | head -1)
+fi
+[ -n "$wallpaper" ] && [ ! -r "$wallpaper" ] && die "no such wallpaper: $wallpaper"
+
+dest=$THEME_DIR/themes/$name
+mkdir -p "$dest" || die "cannot create $dest"
+
+# ── the palette ──────────────────────────────────────────────────────────
+# Read Aether's `key = "#rrggbb"` lines and write this desktop's dialect.
+# Unknown keys are dropped rather than passed through: qs-theme's cascade
+# derives forty keys from these sixteen, and a stray authored one would win
+# over its own derivation.
+awk -v name="$name" -v src="$source" '
+  BEGIN { HEX = "0123456789abcdef" }
+
+  function hv(c,   i) { i = index(HEX, tolower(c)); return i - 1 }
+  function comp(h, i,   s) {
+      s = substr(h, 2 + 2 * i, 2)
+      return hv(substr(s, 1, 1)) * 16 + hv(substr(s, 2, 1))
+  }
+  function byte(n) {
+      if (n < 0) n = 0; if (n > 255) n = 255
+      return sprintf("%02x", int(n + 0.5))
+  }
+  # p of the way from a to b, linearly, per channel.
+  function mix(a, b, p,   i, out) {
+      out = "#"
+      for (i = 0; i < 3; i++)
+          out = out byte(comp(a, i) + (comp(b, i) - comp(a, i)) * p)
+      return out
+  }
+  function need(k) {
+      if (!(k in A)) {
+          printf "aether-to-qs-theme: %s: missing key %s\n", src, k > "/dev/stderr"
+          bad = 1
+      }
+      return A[k]
+  }
+
+  # key = "value", with the comments and the [section] headers Aether does not
+  # actually emit but TOML permits.
+  /^[ \t]*#/ { next }
+  /^[ \t]*\[/ { next }
+  match($0, /^[ \t]*[A-Za-z0-9_]+[ \t]*=/) {
+      key = $0
+      sub(/[ \t]*=.*$/, "", key)
+      gsub(/^[ \t]+|[ \t]+$/, "", key)
+      val = $0
+      sub(/^[^=]*=[ \t]*/, "", val)
+      gsub(/^"|"$|[ \t]+$/, "", val)
+      A[key] = val
+  }
+
+  END {
+      bg     = need("background")
+      fg     = need("foreground")
+      lighter = need("lighter_bg")
+      grey   = need("muted")
+      accent = need("accent")
+      red    = need("red");   green   = need("green")
+      yellow = need("yellow"); blue    = need("blue")
+      magenta = need("magenta"); cyan  = need("cyan")
+      orange = need("orange")
+      if (bad) exit 1
+
+      printf "# %s - converted from an Aether palette by aether-to-qs-theme.\n", name
+      printf "#\n"
+      printf "# Aether authored the two primaries, lighter_bg (here\n"
+      printf "# lighter_background), muted and the seven hues. dim, muted,\n"
+      printf "# accent2, popup_border and accents are derived - see the script\n"
+      printf "# for why each one lands where it does. Edit freely: nothing\n"
+      printf "# regenerates this file unless the converter is run again with\n"
+      printf "# the same -n %s.\n\n", name
+
+      printf "background        = \"%s\"\n", bg
+      printf "foreground        = \"%s\"\n", fg
+      printf "lighter_background = \"%s\"\n", lighter
+      # Aether ships one grey. qs-theme wants two, dim under muted.
+      printf "muted             = \"%s\"\n", mix(grey, fg, 0.45)
+      printf "dim               = \"%s\"\n\n", grey
+
+      printf "accent            = \"%s\"\n", accent
+      printf "accent2           = \"%s\"\n", magenta
+      printf "popup_border      = \"%s\"\n\n", mix(accent, "#ffffff", 0.45)
+
+      printf "accents           = \"%s %s %s %s %s\"\n", blue, magenta, green, orange, cyan
+      printf "rainbow           = \"false\"\n\n"
+
+      printf "red               = \"%s\"\n", red
+      printf "green             = \"%s\"\n", green
+      printf "yellow            = \"%s\"\n", yellow
+      printf "blue              = \"%s\"\n", blue
+      printf "magenta           = \"%s\"\n", magenta
+      printf "cyan              = \"%s\"\n", cyan
+      printf "orange            = \"%s\"\n", orange
+  }
+' "$source" > "$dest/colors.toml.new" || {
+    rm -f "$dest/colors.toml.new"
+    die "conversion failed"
+}
+mv "$dest/colors.toml.new" "$dest/colors.toml"
+
+# ── the wallpaper ────────────────────────────────────────────────────────
+if [ -n "$wallpaper" ]; then
+    mkdir -p "$WALLPAPER_LIB" || die "cannot create $WALLPAPER_LIB"
+    # Named after the theme, so a second conversion replaces its own picture
+    # instead of littering the library.
+    ext=${wallpaper##*.}
+    case $ext in
+        "$wallpaper"|*[!A-Za-z0-9]*) ext=jpg ;;
+    esac
+    copy=$WALLPAPER_LIB/$name.$ext
+    cp -- "$wallpaper" "$copy" || die "cannot copy wallpaper"
+
+    {
+        echo "# Wallpapers for $name, one glob or path per line. The picture"
+        echo "# Aether extracted this palette from, copied out of its output"
+        echo "# tree so the next Apply Theme cannot repoint it."
+        echo "$copy" | sed "s|^$HOME|~|"
+    } > "$dest/wallpapers"
+fi
+
+echo "aether-to-qs-theme: wrote $dest"
