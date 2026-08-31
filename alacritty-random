@@ -14,6 +14,9 @@
 # ~/.local/state/theme/alacritty-colors.toml was imported and then immediately
 # overridden by the random pick. Plain `alacritty` now follows the theme in
 # force; this is here for when a surprise palette is what you want.
+#
+# The window is started detached (setsid), so this returns straight away when
+# run from a shell. ALACRITTY_RANDOM_FOREGROUND=1 keeps it in the foreground.
 
 HAS_CONFIG=0
 IS_SUBCOMMAND=0
@@ -136,6 +139,20 @@ else
     fi
 fi
 
+# Start the terminal detached: `setsid -f` puts it in its own session and
+# process group, so running this from a shell returns the prompt immediately
+# and the window outlives the shell (or the launcher) that spawned it. Set
+# ALACRITTY_RANDOM_FOREGROUND=1 to get the old exec behaviour back, which is
+# what you want when a caller needs to wait on the terminal or read its exit
+# status. The subcommand/--config-file paths above deliberately stay in the
+# foreground: `msg` and friends are meant to be waited on.
+launch() {
+    if [ -n "$ALACRITTY_RANDOM_FOREGROUND" ] || ! command -v setsid >/dev/null 2>&1; then
+        exec "$@"
+    fi
+    setsid -f "$@" </dev/null >/dev/null 2>&1
+}
+
 if [ -n "$THEME_PATH" ] && [ -f "$THEME_PATH" ]; then
     # Create unique temp config file to prevent auto-reload conflicts between windows
     TEMP_CONFIG=$(mktemp /tmp/alacritty-config-XXXXXX.toml)
@@ -146,7 +163,7 @@ import = [
     "$THEME_PATH"
 ]
 EOF
-    exec "$REAL_ALACRITTY" --config-file "$TEMP_CONFIG" "$@"
+    launch "$REAL_ALACRITTY" --config-file "$TEMP_CONFIG" "$@"
 else
-    exec "$REAL_ALACRITTY" "$@"
+    launch "$REAL_ALACRITTY" "$@"
 fi
