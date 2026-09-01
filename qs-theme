@@ -47,9 +47,10 @@
 # THE CASCADE. A theme authors ~17 keys and gets ~40, so a template can ask for
 # bright_red or color9 without every theme having to spell them out. In order:
 # the file, then semantic defaults (orange <- yellow, inactive <- dim,
-# critical <- red, cursor <- bright_foreground, selection <- lighter_background),
-# then derived shades by linear mix, then ANSI aliasing, then light/dark mode
-# by luminance. `qs-theme color <key>` is the way to see what any of it
+# critical <- red, cursor <- bright_foreground, selection <- lighter_background,
+# selection_text <- whichever of the foreground and the background contrasts
+# with the selection more), then derived shades by linear mix, then ANSI
+# aliasing, then light/dark mode by luminance. `qs-theme color <key>` is the way to see what any of it
 # resolved to.
 #
 # QS_THEME_DIR relocates the theme directory, QS_THEME_STATE the generated one,
@@ -103,6 +104,25 @@ resolve() {
           return "#" byte(comp(a,0) + (comp(b,0) - comp(a,0)) * p) \
                      byte(comp(a,1) + (comp(b,1) - comp(a,1)) * p) \
                      byte(comp(a,2) + (comp(b,2) - comp(a,2)) * p)
+      }
+
+      # WCAG relative luminance, and the contrast ratio between two colours.
+      # Used for one decision only - which end of the palette selected text
+      # is drawn in - but it is the one place a wrong guess makes a config
+      # illegible rather than merely ugly, so it is measured, not eyeballed.
+      function srgb(c,   x) {
+          x = c / 255
+          return (x <= 0.03928) ? x / 12.92 : ((x + 0.055) / 1.055) ^ 2.4
+      }
+      # Named in full because `lum` is already a variable in the mode
+      # heuristic below, which is a cruder sum and stays that way.
+      function luminance(h) {
+          return 0.2126 * srgb(comp(h,0)) + 0.7152 * srgb(comp(h,1)) \
+               + 0.0722 * srgb(comp(h,2))
+      }
+      function contrast(a, b,   la, lb) {
+          la = luminance(a); lb = luminance(b)
+          return (la > lb) ? (la + 0.05) / (lb + 0.05) : (lb + 0.05) / (la + 0.05)
       }
 
       function have(k) { return (k in A) && A[k] != "" }
@@ -161,6 +181,18 @@ resolve() {
 
           def("cursor",    A["bright_foreground"])
           def("selection", A["lighter_background"])
+
+          # The text drawn on a selection: whichever end of the palette
+          # stands further from the selection itself. A theme is free to
+          # author a selection that sits up near its foreground - the newer
+          # Omarchy colors.toml carries a selection_foreground precisely
+          # because several upstreams do - and a template that hardcoded the
+          # foreground here would render invisible text. Measured, so no
+          # theme has to remember.
+          if (contrast(A["selection"], A["foreground"]) >= contrast(A["selection"], A["background"]))
+              def("selection_text", A["foreground"])
+          else
+              def("selection_text", A["background"])
 
           # ── ANSI aliasing ────────────────────────────────────────────
           # So the terminal templates can name color0..color15 unconditionally.
