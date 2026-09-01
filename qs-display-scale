@@ -10,8 +10,8 @@
 #
 #   qs-display-scale set <output> <factor>
 #       Scale <output> so the desktop is magnified <factor> times, then
-#       re-pack every output left to right so the new logical size does not
-#       leave the outputs overlapping or gapped.
+#       re-pack the outputs so the new logical size does not leave them
+#       overlapping or gapped.
 #
 # `factor` is UI magnification: 2 means everything is twice as big, i.e. a 4K
 # panel renders a 1920x1080 desktop. Nothing is persisted - the current factor
@@ -53,6 +53,29 @@
 # global while scale is per-output, so it follows the output just scaled - the
 # one being looked at. Like the scale itself nothing is persisted, and a
 # `hyprctl reload` drops both back to what hyprland.conf says.
+#
+# RE-PACK ANCHOR. Changing an output's scale changes its logical width, so the
+# outputs beside it have to move for the row to stay flush - and every window
+# on a moved output moves with it. The anchor decides which windows suffer
+# that. Packing from the origin, as this did originally, holds the leftmost
+# output still and shifts everything to its right: scaling the left head threw
+# the untouched right head's windows sideways, which is exactly the surprise.
+# So the target is anchored on one of its own edges instead and the row packed
+# outward from there: pin its right edge and every output to its right keeps
+# its position while those to its left follow it; pin its left edge and the
+# mirror holds. The edge chosen is the one facing the side with more outputs
+# on it, so the larger group is the one that holds still. With two heads that
+# means neither neighbour ever moves - scaling the left head moves only the
+# left head, scaling the right head only the right - and the head that does
+# move is the one being looked at, whose contents are being resized anyway. A
+# middle head in a three-wide row has no free side, so there the smaller group
+# gives way. The anchor is the layout on screen, not the requested factor, so
+# scaling up and back down returns every output to where it started.
+#
+# An output can end up at a negative x (grow the leftmost head and it extends
+# past the origin). Hyprland places monitors at negative coordinates happily,
+# and normalising the row back to x=0 would move the very outputs this is
+# meant to hold still, so the negative is kept.
 #
 # Outputs are re-packed horizontally in their current left-to-right order,
 # each keeping its current y. A stacked (vertical) layout is not preserved.
@@ -266,18 +289,34 @@ cmd_set_hypr() {
     args=$(query_hypr | parse_hypr | sort -t "$(printf '\t')" -k6,6n |
         awk -v target="$target" -v factor="$factor" "$HYPR_SCALE120"'
       {
-          w = $3; h = $4; tr = $9
+          n++
+          nm[n] = $1; W[n] = $3; H[n] = $4; RR[n] = $5
+          OX[n] = $6; Y[n] = $7; TR[n] = $9
           f = $8
-          if ($1 == target) { found = 1; f = factor }
-          k = hypr_k(w, h, f); lw = w * 120 / k; lh = h * 120 / k
-          if ($1 == target) tk = k
+          if ($1 == target) { found = 1; ti = n; f = factor }
           # The scale we ask for is exact by construction, so Hyprland has no
           # snapping of its own to do and the re-pack below stays honest.
-          printf " ; keyword monitor %s,%dx%d@%s,%dx%d,%.6f", $1, w, h, $5, x, $7, k / 120
-          x += (tr % 2 == 1) ? lh : lw
+          K[n] = hypr_k(W[n], H[n], f)
+          lw = W[n] * 120 / K[n]; lh = H[n] * 120 / K[n]
+          NW[n] = (TR[n] % 2 == 1) ? lh : lw
+          # The width the monitor occupies right now, snapped the same way, so
+          # the anchor below is computed against the layout actually on screen.
+          ok = hypr_k(W[n], H[n], $8)
+          lw = W[n] * 120 / ok; lh = H[n] * 120 / ok
+          CW[n] = (TR[n] % 2 == 1) ? lh : lw
       }
       END {
           if (!found) exit 3
+          # Anchor the target on the edge facing the more populated side, so
+          # the larger group of untouched outputs is the one that holds still
+          # - see RE-PACK ANCHOR above. Then pack outward from there.
+          X[ti] = (n - ti >= ti - 1) ? OX[ti] + CW[ti] - NW[ti] : OX[ti]
+          for (i = ti - 1; i >= 1; i--) X[i] = X[i + 1] - NW[i]
+          for (i = ti + 1; i <= n; i++) X[i] = X[i - 1] + NW[i - 1]
+          for (i = 1; i <= n; i++)
+              printf " ; keyword monitor %s,%dx%d@%s,%dx%d,%.6f",
+                     nm[i], W[i], H[i], RR[i], X[i], Y[i], K[i] / 120
+          tk = K[ti]
           # Pointer speed compensation - see POINTER SPEED above. Derived from
           # the snapped k, not the requested factor, so it cannot disagree with
           # the scale actually in force. Only a scale of 0.5 or below hits the
