@@ -113,6 +113,7 @@ WALLPAPER_LIB=${QS_THEME_WALLPAPER_LIB:-$HOME/Dropbox/wallpapers}
 # and can be thrown away at any time, which is what makes it a cache.
 CACHE_DIR=${QS_THEME_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/qs-theme}
 PREVIEW_IMAGE_DIR=$CACHE_DIR/preview-images
+PREVIEW_CARD_DIR=$CACHE_DIR/preview-cards
 DEFAULT_THEME=doomone
 TAB=$(printf '\t')
 
@@ -925,6 +926,103 @@ cache_preview_images() {
     force=$1
     for name in $(cmd_upstream_list); do
         cache_preview_image "$name" "$force" || :
+    done
+}
+
+
+# ── The palette card ─────────────────────────────────────────────────────
+# What a theme with no upstream screenshot shows instead: its own background
+# as the ground, its name across it and a row of its accents beneath. Drawn at
+# the screenshots' 1800x1012 so a grid of the two kinds is one size.
+#
+# Built from the resolved palette rather than colors.toml, so a theme carrying
+# local overrides shows the colours actually in force - which is a thing an
+# upstream screenshot could not show even if there were one.
+CARD_WIDTH=1800
+CARD_HEIGHT=1012
+
+# ImageMagick 7 renames the command; 6 is still what several of these machines
+# have. Either draws this.
+run_magick() {
+    if command -v magick >/dev/null 2>&1; then
+        magick "$@"
+    else
+        convert "$@"
+    fi
+}
+
+have_magick() {
+    command -v magick >/dev/null 2>&1 || command -v convert >/dev/null 2>&1
+}
+
+# Draw one theme's card, unless the one on disk is already current. force
+# redraws it anyway.
+#
+# Current means newer than the colors.toml it was drawn from, which is the
+# only input: an edited palette - an override appended, a refresh applied -
+# invalidates that theme's card and nothing else. Screenshots are cached by
+# existence because their input is upstream and unwatchable; a card's input is
+# a file right here, so it can be watched.
+cache_preview_card() {
+    name=$1
+    force=$2
+    colors=$THEME_DIR/themes/$name/colors.toml
+    [ -r "$colors" ] || return 1
+    dest=$PREVIEW_CARD_DIR/$name.png
+    if [ "$force" != 1 ] && [ -s "$dest" ] && [ ! "$colors" -nt "$dest" ]; then
+        return 0
+    fi
+    have_magick || return 1
+
+    palette=$(resolve "$name") || return 1
+    bg=$(printf '%s\n' "$palette" | awk -F "$TAB" '$1 == "background" { print $2; exit }')
+    fg=$(printf '%s\n' "$palette" | awk -F "$TAB" '$1 == "foreground" { print $2; exit }')
+    accents=$(printf '%s\n' "$palette" | awk -F "$TAB" '$1 == "accents" { print $2; exit }')
+    [ -n "$bg" ] && [ -n "$fg" ] || return 1
+
+    # The swatch row is centred in a 1440 wide band, and a swatch is 260 wide
+    # at most: five accents sit at that width, and a palette that publishes
+    # more gets narrower ones rather than a row running off the card.
+    n=0
+    for c in $accents; do n=$((n + 1)); done
+    band=1440
+    gap=40
+    if [ "$n" -gt 0 ]; then
+        swatch=$(((band - (n - 1) * gap) / n))
+        [ "$swatch" -le 260 ] || swatch=260
+        row=$((n * swatch + (n - 1) * gap))
+        x=$(((CARD_WIDTH - row) / 2))
+    fi
+
+    set -- -size "${CARD_WIDTH}x${CARD_HEIGHT}" "xc:$bg" -gravity NorthWest
+    for c in $accents; do
+        set -- "$@" -fill "$c" \
+            -draw "roundrectangle $x,620 $((x + swatch)),760 24,24"
+        x=$((x + swatch + gap))
+    done
+    # label: rather than a pointsize, so the longest theme name is scaled to
+    # the band instead of being drawn off the edge of it.
+    set -- "$@" \
+        \( -background none -fill "$fg" -size "${band}x200" \
+           -gravity center "label:$name" \) \
+        -gravity North -geometry +0+300 -composite
+
+    mkdir -p "$PREVIEW_CARD_DIR" || return 1
+    part=$dest.part.$$
+    if run_magick "$@" "png:$part" 2>/dev/null && [ -s "$part" ]; then
+        mv -f -- "$part" "$dest" && return 0
+    fi
+    rm -f -- "$part"
+    return 1
+}
+
+# A card for every theme that has no cached screenshot. Called after the
+# screenshots, so a theme that has just been fetched is not also drawn.
+cache_preview_cards() {
+    force=$1
+    for name in $(cmd_list); do
+        [ -s "$PREVIEW_IMAGE_DIR/$name.png" ] && continue
+        cache_preview_card "$name" "$force" || :
     done
 }
 
