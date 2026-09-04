@@ -34,7 +34,9 @@ NOX=${EMACS_NOX:-$(default_nox)}
 # Set EMACS_PGTK=1 for a pure GTK (Wayland-native) build. It cannot share a
 # prefix with the X11 build - both install the same binary and share/ names - so
 # it goes to its own prefix and is exposed as /usr/local/bin/emacs-pgtk. Run the
-# script once per flavour to refresh both.
+# script once per flavour to refresh both. Once built, the pgtk flavour also owns
+# the plain /usr/local/bin/emacs and /usr/local/bin/emacsclient names; see
+# `link_default_emacs' at the end of this script for why.
 PGTK=${EMACS_PGTK:-0}
 
 if [[ "$NOX" -eq 1 && "$PGTK" -eq 1 ]]; then
@@ -461,10 +463,33 @@ sudo make install
 
 # The pgtk build lives in its own prefix so it cannot clobber the X11 one; give
 # it a stable name on PATH.
+#
+# It also owns the plain `emacs' and `emacsclient' names whenever it is
+# installed, because the two flavours do not render alike: both take their point
+# size from the same init file, but the X11 build resolves it through GTK's
+# XSETTINGS/GSettings DPI (96 * text-scaling-factor) while pgtk resolves it at 96
+# DPI flat, so the X11 build comes out ~20% larger for the same request. Leaving
+# `emacs' pointing at whichever flavour was built last means the launcher and the
+# terminal disagree about font size. Wayland is the session, so pgtk wins.
+link_default_emacs() {
+    local prefix=$1
+    sudo ln -sfn "$prefix/bin/emacs" /usr/local/bin/emacs
+    sudo ln -sfn "$prefix/bin/emacsclient" /usr/local/bin/emacsclient
+    echo ">>> Default /usr/local/bin/emacs -> $prefix/bin/emacs"
+}
+
 if [[ "$PGTK" -eq 1 ]]; then
     sudo ln -sfn "$PREFIX/bin/emacs" /usr/local/bin/emacs-pgtk
     sudo ln -sfn "$PREFIX/bin/emacsclient" /usr/local/bin/emacsclient-pgtk
     echo ">>> Installed /usr/local/bin/emacs-pgtk -> $PREFIX/bin/emacs"
+    link_default_emacs "$PREFIX"
+elif [[ -x /usr/local/emacs-pgtk/bin/emacs ]]; then
+    # `make install' of an X11 or -nox build has just overwritten
+    # /usr/local/bin/emacs and /usr/local/bin/emacsclient with its own. Hand the
+    # plain names back to the pgtk build; this flavour stays reachable as
+    # /usr/local/bin/emacs-<version>.
+    echo ">>> A pgtk build is installed; restoring it as the default emacs."
+    link_default_emacs /usr/local/emacs-pgtk
 fi
 
 # Rebuild ghostel's native module. Not required by the Emacs build itself, but
