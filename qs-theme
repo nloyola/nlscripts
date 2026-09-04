@@ -737,10 +737,13 @@ cmd_refresh() {
 }
 
 # ── Install and remove ───────────────────────────────────────────────────
-# Adding a theme is a change to this repo and is meant to be: colors.toml and
-# the URL it tracks are version controlled, and only the images are not. That
-# is the one way install differs from set, which deliberately writes nothing
-# inside the theme directory at all.
+# Adding a theme is a change to whatever repository holds the theme directory,
+# and is meant to be: colors.toml and the URL it tracks are version controlled,
+# and only the images are not. That is the one way install differs from set,
+# which deliberately writes nothing inside the theme directory at all - which
+# is also why the themes are their own repository rather than part of the
+# dotfiles tree that carries them, so a theme installed from a GUI cannot leave
+# uncommitted files in a config repo.
 
 # The theme name a package repository implies: omarchy-akane-theme is akane,
 # delete-theme is delete. Both affixes are conventions rather than rules, so
