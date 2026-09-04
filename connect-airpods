@@ -2,7 +2,7 @@
 set -euo pipefail
 
 AIRPODS_MAC="${AIRPODS_MAC:-30:82:16:8B:EC:52}"
-AIRPODS_NAME="${AIRPODS_NAME:-AirPods Pro JA}"
+AIRPODS_NAME="${AIRPODS_NAME:-AirPods Pro NL}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-20}"
 
 log() {
@@ -71,7 +71,12 @@ connect_airpods() {
     return 2
   fi
 
-  bluetoothctl trust "$AIRPODS_MAC" >/dev/null || true
+  # Deliberately does NOT trust the AirPods. A trusted device bypasses the
+  # org.bluez.Agent1 AuthorizeService call, which is what bt-consent uses to
+  # ask before anything connects on its own (see nix/bt-consent.nix in
+  # home_config). bt-consent reverts a trust within seconds anyway, so the old
+  # `bluetoothctl trust` here was dead weight that only looked meaningful.
+  # An outgoing connect like the one below needs no trust and is unaffected.
 
   if connected && { audio_card_visible || audio_sink_visible; }; then
     log "AirPods are already connected and visible to PulseAudio/PipeWire."
