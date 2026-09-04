@@ -58,9 +58,12 @@
 # to.
 #
 # OMARCHY THEMES. An upstream colors.toml drops into themes/<name>/ verbatim
-# and resolves as itself - see the remap in the awk below for what it renames
-# and what it derives. Every theme here with an Omarchy package is that
-# package's own file, unedited.
+# and resolves as itself - see the two remaps in the awk below for what each
+# renames and what it derives. Packages come in two shapes: one that names
+# roles (light_foreground, dark_foreground) and one that is a bare
+# color0..color15 table, and the key that exists only in each is what tells
+# them apart. Every theme here with an Omarchy package is that package's own
+# file, unedited.
 #
 # UPSTREAM. Such a theme also carries themes/<name>/upstream: one line, the
 # URL of the colors.toml it was taken from. That is what makes `refresh` a
@@ -174,6 +177,56 @@ resolve() {
           def("dim", A["muted"])                    # before muted is retaken
           if (have("light_foreground")) A["muted"] = A["light_foreground"]
           def("inactive", A["dark_foreground"])
+          chrome()
+      }
+
+      # ── the color0..color15 packages ─────────────────────────────────
+      # The other shape a community Omarchy theme comes in: accent, cursor,
+      # foreground, background, both ends of the selection, and a bare ANSI
+      # table. It assigns no roles, so where the file above says what a
+      # colour is for, this one says only where it sits in a terminal, and
+      # the roles are read off those slots.
+      #
+      # muted and dim are the two that are a reading rather than a rename.
+      # color7 is the normal white, the ordinary text a shade below the
+      # foreground; color8 is the bright black, which every one of these
+      # packages uses for the faint work - borders, inactive text, the
+      # dimmest line in walker and mako. Those are the roles muted and dim
+      # fill here, so that is where those two slots go.
+      #
+      # What no such package states is the bar chrome proper -
+      # lighter_background, accents, and any accent2 that is not the
+      # magenta. A theme that wants those keeps them below the override
+      # marker; the fallbacks here are so a package can still be dropped in
+      # whole and resolve.
+      function omarchy_ansi(   hue, i, n) {
+          def("black", A["color0"])
+          n = split("red green yellow blue magenta cyan", hue, " ")
+          for (i = 1; i <= n; i++) def(hue[i], A["color" i])
+          def("white", A["color7"])
+          def("muted", A["color7"])
+          def("dim",   A["color8"])
+
+          # The bright row is authored here, not a lightening of the normal
+          # one - several of these rotate the hue instead - so it is taken
+          # slot for slot rather than derived.
+          n = split("black red green yellow blue magenta cyan white", hue, " ")
+          for (i = 1; i <= n; i++) def("bright_" hue[i], A["color" (i + 7)])
+
+          def("selection",      A["selection_background"])
+          def("selection_text", A["selection_foreground"])
+
+          # The one key with nothing behind it at all. These packages theme
+          # every panel as the background with a border, so there is no
+          # surface colour to take; a fifth of the way to the accent is the
+          # step the dark themes here already use.
+          def("lighter_background", mix(A["background"], A["accent"], 0.20))
+          chrome()
+      }
+
+      # What both remaps derive once the hues are in place, because neither
+      # upstream format carries any of it.
+      function chrome(   hue, i, n, out, seen) {
           def("accent2",  A["magenta"])
           def("rainbow",  "false")                  # no upstream asks for it
           def("orange",   A["yellow"])              # needed by accents below
@@ -242,7 +295,12 @@ resolve() {
               A["mode"] = (lum > 382) ? "light" : "dark"
           }
 
+          # Which upstream this is, if it is one. light_foreground and
+          # dark_foreground exist only in the first format and color0 only
+          # in the second, so neither discriminator can reach a theme
+          # authored here.
           if (have("light_foreground") || have("dark_foreground")) omarchy()
+          else if (have("color0")) omarchy_ansi()
 
           # Authored keys with no sensible derivation. A theme missing one of
           # these would render a config full of empty colours, so say so.
