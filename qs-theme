@@ -22,6 +22,12 @@
 #   qs-theme refresh [--write] [name...]
 #       Re-fetch every theme that names an upstream and print what has moved
 #       there since it was taken. --write applies it. See UPSTREAM below.
+#   qs-theme install <repo-url> [name]
+#       Add an Omarchy theme package as a theme here: its colors.toml, the
+#       URL to track it by, and its backgrounds copied into the wallpaper
+#       library. Refuses a package that does not resolve.
+#   qs-theme remove <name>
+#       Drop a theme. Leaves its wallpapers where they are.
 #
 # WHY A DIRECTORY OF THEMES AND NOT A WALLPAPER. Picking a wallpaper does not
 # retheme anything, here or in Omarchy, whose model this follows: a theme is
@@ -88,6 +94,10 @@ THEME_DIR=${QS_THEME_DIR:-$HOME/.config/theme}
 STATE=${QS_THEME_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/theme}
 BOTTOM_CONFIG=${QS_THEME_BOTTOM:-$HOME/.config/bottom/bottom.toml}
 WALLPAPER=${QS_THEME_WALLPAPER:-$HOME/.local/bin/qs-wallpaper}
+# Where install puts a package's backgrounds. Outside the repo, like every
+# other wallpaper set: the palette is version controlled and the images are
+# not.
+WALLPAPER_LIB=${QS_THEME_WALLPAPER_LIB:-$HOME/Dropbox/wallpapers}
 DEFAULT_THEME=doomone
 TAB=$(printf '\t')
 
@@ -98,7 +108,8 @@ OVERRIDE_MARK='# qs-theme: local overrides below this line'
 usage() {
     echo "usage: qs-theme set <name> | cycle | list | current | previews
                     | wallpapers [name] | color <key> [fallback]
-                    | refresh [--write] [name...]" >&2
+                    | refresh [--write] [name...]
+                    | install <repo-url> [name] | remove <name>" >&2
     exit 2
 }
 
@@ -715,6 +726,122 @@ cmd_refresh() {
     [ "$drift" = 0 ]
 }
 
+# ── Install and remove ───────────────────────────────────────────────────
+# Adding a theme is a change to this repo and is meant to be: colors.toml and
+# the URL it tracks are version controlled, and only the images are not. That
+# is the one way install differs from set, which deliberately writes nothing
+# inside the theme directory at all.
+
+# The theme name a package repository implies: omarchy-akane-theme is akane,
+# delete-theme is delete. Both affixes are conventions rather than rules, so
+# an explicit name always wins.
+repo_theme_name() {
+    n=${1##*/}
+    n=${n%.git}
+    n=${n#omarchy-}
+    n=${n%-theme}
+    printf '%s\n' "$n"
+}
+
+# The raw URL of a colors.toml on a branch, for the upstream file. Only the
+# forges whose raw layout is known are handled; anything else installs fine
+# and simply does not get tracked, which is better than writing a URL that
+# refresh would fail on later.
+raw_colors_url() {
+    case $1 in
+        https://github.com/*)
+            printf 'https://raw.githubusercontent.com/%s/%s/colors.toml\n' \
+                   "$(echo "${1#https://github.com/}" | sed 's/\.git$//')" "$2" ;;
+        git@github.com:*)
+            printf 'https://raw.githubusercontent.com/%s/%s/colors.toml\n' \
+                   "$(echo "${1#git@github.com:}" | sed 's/\.git$//')" "$2" ;;
+        *)  return 1 ;;
+    esac
+}
+
+cmd_install() {
+    url=$1
+    [ -n "$url" ] || usage
+    name=${2:-$(repo_theme_name "$url")}
+    case $name in
+        ''|*/*|.*) die "not a usable theme name: $name" ;;
+    esac
+    dir=$THEME_DIR/themes/$name
+    [ -e "$dir" ] && die "$name is already installed - qs-theme refresh $name, or remove it first"
+    command -v git >/dev/null 2>&1 || die "install needs git"
+
+    work=${TMPDIR:-/tmp}/qs-theme-install.$$
+    mkdir -p "$work" || exit 1
+    trap 'rm -rf "$work"' EXIT INT TERM
+
+    git clone --quiet --depth 1 -- "$url" "$work/pkg" ||
+        die "could not clone $url"
+    [ -r "$work/pkg/colors.toml" ] ||
+        die "$url has no colors.toml at its root"
+
+    # Resolved before anything is written, so a package in a format this
+    # cascade cannot read is refused here rather than discovered the next
+    # time something calls set.
+    mkdir -p "$work/vet/themes/$name" &&
+        cp "$work/pkg/colors.toml" "$work/vet/themes/$name/colors.toml" || exit 1
+    ( THEME_DIR=$work/vet; resolve "$name" >/dev/null ) ||
+        die "$url does not resolve as a theme"
+
+    branch=$(git -C "$work/pkg" rev-parse --abbrev-ref HEAD 2>/dev/null)
+    [ -n "$branch" ] && [ "$branch" != HEAD ] || branch=main
+
+    mkdir -p "$dir" || exit 1
+    cp "$work/pkg/colors.toml" "$dir/colors.toml" || exit 1
+    if raw=$(raw_colors_url "$url" "$branch"); then
+        printf '%s\n' "$raw" > "$dir/upstream"
+    else
+        echo "qs-theme: $name: no known raw URL for $url, so it will not be tracked" >&2
+    fi
+
+    # Backgrounds are copied out of the clone rather than referenced from it,
+    # so nothing here depends on that checkout still existing. Prefixed with
+    # the theme name because the library is flat per set and several packages
+    # ship a 1.jpg.
+    n=0
+    if [ -d "$work/pkg/backgrounds" ]; then
+        mkdir -p "$WALLPAPER_LIB/$name" || exit 1
+        for f in "$work/pkg/backgrounds"/*; do
+            [ -f "$f" ] || continue
+            cp -- "$f" "$WALLPAPER_LIB/$name/$name-$(basename "$f")" || exit 1
+            n=$((n + 1))
+        done
+    fi
+    if [ "$n" -gt 0 ]; then
+        {
+            echo "# The $n backgrounds shipped with the upstream $name package,"
+            echo "# copied out of its repo so nothing here depends on that clone."
+            echo "$WALLPAPER_LIB/$name/$name-*" | sed "s|^$HOME/|~/|"
+        } > "$dir/wallpapers"
+    else
+        echo "qs-theme: $name: the package ships no backgrounds/, so it has no wallpapers" >&2
+    fi
+
+    echo "$name: installed from $url ($n wallpapers)"
+    echo "try it with: qs-theme set $name"
+}
+
+cmd_remove() {
+    name=$1
+    [ -n "$name" ] || usage
+    dir=$THEME_DIR/themes/$name
+    [ -d "$dir" ] || die "no such theme: $name"
+    [ "$name" = "$DEFAULT_THEME" ] &&
+        die "$name is the fallback theme, which has to stay"
+    [ "$name" = "$(cmd_current)" ] &&
+        die "$name is the live theme - switch away from it first"
+
+    rm -rf "$dir" || exit 1
+    echo "$name: removed"
+    [ -d "$WALLPAPER_LIB/$name" ] &&
+        echo "its wallpapers are left in $WALLPAPER_LIB/$name"
+    :
+}
+
 case $1 in
     set)     shift; cmd_set "$@" ;;
     cycle)   cmd_cycle ;;
@@ -724,5 +851,7 @@ case $1 in
     current) cmd_current ;;
     color)   shift; cmd_color "$@" ;;
     refresh) shift; cmd_refresh "$@" ;;
+    install) shift; cmd_install "$@" ;;
+    remove)  shift; cmd_remove "$@" ;;
     *)       usage ;;
 esac
