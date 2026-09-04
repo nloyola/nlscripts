@@ -19,6 +19,9 @@
 #   qs-theme color <key> [fallback]
 #       One resolved value for the current theme - authored or derived. This
 #       is the hook for anything that wants a colour without a template.
+#   qs-theme refresh [--write] [name...]
+#       Re-fetch every theme that names an upstream and print what has moved
+#       there since it was taken. --write applies it. See UPSTREAM below.
 #
 # WHY A DIRECTORY OF THEMES AND NOT A WALLPAPER. Picking a wallpaper does not
 # retheme anything, here or in Omarchy, whose model this follows: a theme is
@@ -56,13 +59,23 @@
 #
 # OMARCHY THEMES. An upstream colors.toml drops into themes/<name>/ verbatim
 # and resolves as itself - see the remap in the awk below for what it renames
-# and what it derives. Of the 22 themes shared with upstream, 11 resolve byte
-# for byte identically to the copies transcribed here by hand; the rest differ
-# only where a deliberate choice was made, and keep that choice by appending
-# the overriding keys to the same file. Those overrides must be written in
-# upstream vocabulary - light_foreground rather than muted - because the two
-# formats disagree about what muted names. gruvbox is not a port at all: its
-# background is authored, not upstream's.
+# and what it derives. Every theme here with an Omarchy package is that
+# package's own file, unedited.
+#
+# UPSTREAM. Such a theme also carries themes/<name>/upstream: one line, the
+# URL of the colors.toml it was taken from. That is what makes `refresh` a
+# command rather than a chore - the file is the whole record of where the
+# theme came from, so nothing has to remember which tree or which branch.
+#
+# A theme that wants to differ from its upstream appends its overriding keys
+# to colors.toml under this line, on its own:
+#
+#   # qs-theme: local overrides below this line
+#
+# refresh replaces everything above that line and keeps everything below it,
+# so a deviation survives an update instead of being silently reverted. The
+# overrides must be written in upstream vocabulary - light_foreground rather
+# than muted - because the two formats disagree about what muted names.
 #
 # QS_THEME_DIR relocates the theme directory, QS_THEME_STATE the generated one,
 # QS_THEME_BOTTOM the btm config, and QS_THEME_DRY=1 renders without touching
@@ -75,9 +88,14 @@ WALLPAPER=${QS_THEME_WALLPAPER:-$HOME/.local/bin/qs-wallpaper}
 DEFAULT_THEME=doomone
 TAB=$(printf '\t')
 
+# The line in a colors.toml below which everything belongs to this repo. Kept
+# as one exact string because refresh both matches on it and writes it.
+OVERRIDE_MARK='# qs-theme: local overrides below this line'
+
 usage() {
     echo "usage: qs-theme set <name> | cycle | list | current | previews
-                    | wallpapers [name] | color <key> [fallback]" >&2
+                    | wallpapers [name] | color <key> [fallback]
+                    | refresh [--write] [name...]" >&2
     exit 2
 }
 
@@ -506,6 +524,139 @@ cmd_set() {
     reload_consumers
 }
 
+# ── Refresh ──────────────────────────────────────────────────────────────
+# Bring the themes that track an upstream back level with it.
+#
+# Reporting is the default and writing is the flag, because the whole point of
+# tracking upstream is that a refresh is not a decision anyone makes blind: an
+# upstream author can repaint a theme between one commit and the next - akane
+# went from mauve on navy to red on near-black in a single package - and a
+# silent overwrite would land that on the desktop with no notice.
+
+# The URL a theme was taken from: the first line of themes/<name>/upstream
+# that is neither blank nor a comment.
+upstream_url() {
+    sed -e 's/^[ \t]*//' -e 's/[ \t]*$//' "$1" |
+        grep -v -e '^#' -e '^$' | head -1
+}
+
+# An absolute path is fetched as itself. That is not a convenience for the
+# command line - it is what lets the test suite exercise refresh end to end
+# with no network.
+fetch_upstream() {
+    case $1 in
+        /*)                 cat -- "$1" ;;
+        http://*|https://*)
+            if command -v curl >/dev/null 2>&1; then
+                curl -sfL --max-time 30 "$1"
+            elif command -v wget >/dev/null 2>&1; then
+                wget -q -T 30 -O - "$1"
+            else
+                die "refresh needs curl or wget"
+            fi ;;
+        *)                  return 2 ;;
+    esac
+}
+
+cmd_upstream_list() {
+    for d in "$THEME_DIR"/themes/*/; do
+        [ -r "$d/upstream" ] && [ -r "$d/colors.toml" ] && basename "$d"
+    done
+}
+
+cmd_refresh() {
+    write=0
+    while [ $# -gt 0 ]; do
+        case $1 in
+            -w|--write) write=1; shift ;;
+            --)         shift; break ;;
+            -*)         usage ;;
+            *)          break ;;
+        esac
+    done
+
+    [ $# -gt 0 ] || set -- $(cmd_upstream_list)
+    [ $# -gt 0 ] || die "no theme names an upstream"
+
+    work=${TMPDIR:-/tmp}/qs-theme-refresh.$$
+    mkdir -p "$work/vet/themes" || exit 1
+    trap 'rm -rf "$work"' EXIT INT TERM
+
+    moved=""
+    drift=0
+    broke=0
+    for name in "$@"; do
+        dir=$THEME_DIR/themes/$name
+        [ -r "$dir/colors.toml" ] || die "no such theme: $name"
+        if [ ! -r "$dir/upstream" ]; then
+            echo "qs-theme: $name: tracks no upstream, skipped" >&2
+            broke=1; continue
+        fi
+        url=$(upstream_url "$dir/upstream")
+        if [ -z "$url" ]; then
+            echo "qs-theme: $name: upstream names no URL" >&2
+            broke=1; continue
+        fi
+        # Emptiness is checked as well as the exit status: a proxy or a
+        # captive portal answers 200 with nothing, and truncating a live
+        # theme to zero bytes is the one outcome worth being paranoid about.
+        if ! fetch_upstream "$url" > "$work/fetched" || [ ! -s "$work/fetched" ]; then
+            echo "qs-theme: $name: could not fetch $url" >&2
+            broke=1; continue
+        fi
+
+        # The candidate is what upstream says now, followed by whatever this
+        # repo has appended below the marker. The blank line is part of the
+        # canonical form and is written rather than carried: the marker
+        # itself is the first line sed keeps, so a blank line that had been
+        # typed above it would be dropped here and the file would then report
+        # drift on every run, for ever, over nothing.
+        cp "$work/fetched" "$work/candidate" || exit 1
+        if grep -q "^$OVERRIDE_MARK\$" "$dir/colors.toml"; then
+            printf '\n' >> "$work/candidate"
+            sed -n "/^$OVERRIDE_MARK\$/,\$p" "$dir/colors.toml" >> "$work/candidate"
+        fi
+
+        if cmp -s "$work/candidate" "$dir/colors.toml"; then
+            echo "$name: up to date"
+            continue
+        fi
+
+        # Put the candidate through the cascade before showing it, let alone
+        # writing it. An upstream that has dropped a required key would
+        # otherwise be reported as an ordinary diff and then break every
+        # template the next time anything called set.
+        rm -rf "$work/vet/themes/$name"
+        mkdir -p "$work/vet/themes/$name" &&
+            cp "$work/candidate" "$work/vet/themes/$name/colors.toml" || exit 1
+        if ! ( THEME_DIR=$work/vet; resolve "$name" >/dev/null ); then
+            echo "qs-theme: $name: upstream no longer resolves, left alone" >&2
+            broke=1; continue
+        fi
+
+        drift=1
+        echo "$name: differs from $url"
+        diff -u "$dir/colors.toml" "$work/candidate" | tail -n +3
+        if [ "$write" = 1 ]; then
+            cp "$work/candidate" "$dir/colors.toml" || exit 1
+            echo "$name: updated"
+            moved="$moved $name"
+        fi
+    done
+
+    # Nothing here re-renders: refresh changes what a theme is, and set is
+    # what puts a theme on the screen. Saying so is better than guessing that
+    # the user wanted the switch too.
+    case " $moved " in
+        *" $(cmd_current) "*)
+            echo "the live theme moved - run: qs-theme set $(cmd_current)" ;;
+    esac
+
+    [ "$broke" = 0 ] || return 3
+    [ "$write" = 1 ] && return 0
+    [ "$drift" = 0 ]
+}
+
 case $1 in
     set)     shift; cmd_set "$@" ;;
     cycle)   cmd_cycle ;;
@@ -514,5 +665,6 @@ case $1 in
     list)    cmd_list ;;
     current) cmd_current ;;
     color)   shift; cmd_color "$@" ;;
+    refresh) shift; cmd_refresh "$@" ;;
     *)       usage ;;
 esac
