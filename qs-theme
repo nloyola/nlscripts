@@ -195,6 +195,14 @@ resolve() {
           if (val ~ /^"/) { sub(/^"/, "", val); sub(/".*$/, "", val) }
           else            { sub(/[ \t]*#.*$/, "", val); sub(/[ \t]+$/, "", val) }
 
+          # Upstream ships hex in whatever case its author wrote, and a theme
+          # read verbatim would carry that into every generated config, mixed
+          # in among the lowercase every other theme produces. Folded here, at
+          # the only door values come in by, so nothing downstream has to
+          # care. Derived values are already lowercase - they come out of
+          # sprintf("%02x"). Guarded so mode and rainbow are left alone.
+          if (val ~ /^#[0-9A-Fa-f]+([ \t]+#[0-9A-Fa-f]+)*$/) val = tolower(val)
+
           if (val ~ /[|\\&]/ || val ~ /{{/) {
               printf "qs-theme: %s: bad character in value for %s, ignored\n",
                      theme, key > "/dev/stderr"
