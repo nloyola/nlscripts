@@ -96,8 +96,9 @@
 # than muted - because the two formats disagree about what muted names.
 #
 # QS_THEME_DIR relocates the theme directory, QS_THEME_STATE the generated one,
-# QS_THEME_BOTTOM the btm config, and QS_THEME_DRY=1 renders without touching
-# wallpapers or signalling anything - which is what the test script drives.
+# QS_THEME_CACHE the preview cache, QS_THEME_BOTTOM the btm config, and
+# QS_THEME_DRY=1 renders without touching wallpapers or signalling anything -
+# which is what the test script drives.
 
 THEME_DIR=${QS_THEME_DIR:-$HOME/.config/theme}
 STATE=${QS_THEME_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/theme}
@@ -107,6 +108,11 @@ WALLPAPER=${QS_THEME_WALLPAPER:-$HOME/.local/bin/qs-wallpaper}
 # other wallpaper set: the palette is version controlled and the images are
 # not.
 WALLPAPER_LIB=${QS_THEME_WALLPAPER_LIB:-$HOME/Dropbox/wallpapers}
+# Everything the picker grid is drawn from: fetched screenshots, generated
+# cards and the link farm over them. All of it is derivable from the themes
+# and can be thrown away at any time, which is what makes it a cache.
+CACHE_DIR=${QS_THEME_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/qs-theme}
+PREVIEW_IMAGE_DIR=$CACHE_DIR/preview-images
 DEFAULT_THEME=doomone
 TAB=$(printf '\t')
 
@@ -855,6 +861,73 @@ cmd_remove() {
     :
 }
 
+# ── Preview images ───────────────────────────────────────────────────────
+# What a theme looks like is a picture of a desktop running it, not one of its
+# wallpapers: two themes can ship the same photograph, and neither of them
+# shows the palette. An Omarchy package publishes exactly that picture, a
+# preview.png beside the colors.toml, and the catalog behind the manager's
+# browse key already draws it - so the installed grid can be made to show the
+# same kind of thing.
+#
+# A theme's screenshot is the preview.png sibling of the URL in
+# themes/<name>/upstream, the derivation refresh already uses to re-fetch the
+# palette. Nothing therefore has to record a second address per theme, and a
+# theme that tracks no upstream has no screenshot by construction - it gets a
+# generated palette card instead.
+
+# The address of the screenshot, given the address of the palette. Absolute
+# paths are derived the same way, which is what lets the test suite exercise
+# this with no network, exactly as fetch_upstream does for refresh.
+preview_image_url() {
+    case $1 in
+        */colors.toml) printf '%s/preview.png\n' "${1%/colors.toml}" ;;
+        *)             return 1 ;;
+    esac
+}
+
+have_fetcher() {
+    command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1
+}
+
+# Fetch one theme's screenshot, unless it is already cached. force refetches.
+#
+# A cached screenshot is kept indefinitely: an upstream author repaints a
+# palette far more often than they reshoot the desktop, and --force is there
+# for when they do. A failed fetch leaves nothing at all - no partial file and
+# no marker saying it was tried - so a theme that was unreachable this time is
+# retried on the next run rather than left with a card for ever.
+cache_preview_image() {
+    name=$1
+    force=$2
+    dest=$PREVIEW_IMAGE_DIR/$name.png
+    [ "$force" = 1 ] || [ ! -s "$dest" ] || return 0
+
+    [ -r "$THEME_DIR/themes/$name/upstream" ] || return 1
+    url=$(preview_image_url "$(upstream_url "$THEME_DIR/themes/$name/upstream")") ||
+        return 1
+    case $url in
+        http://*|https://*) have_fetcher || return 1 ;;
+    esac
+
+    mkdir -p "$PREVIEW_IMAGE_DIR" || return 1
+    part=$dest.part.$$
+    if fetch_upstream "$url" > "$part" 2>/dev/null && [ -s "$part" ]; then
+        mv -f -- "$part" "$dest" && return 0
+    fi
+    rm -f -- "$part"
+    return 1
+}
+
+# Every tracked theme, in one pass. A theme that has no screenshot upstream is
+# not an error and does not stop the others: seven of them are like that, and
+# what they get instead is a card built from the palette itself.
+cache_preview_images() {
+    force=$1
+    for name in $(cmd_upstream_list); do
+        cache_preview_image "$name" "$force" || :
+    done
+}
+
 # ── The theme manager's two views ────────────────────────────────────────
 # Both exist so the picker has no second opinion about what a theme is. It
 # could scan the theme directory itself, and then a theme installed while it
@@ -896,7 +969,7 @@ cmd_inventory() {
 # repointed at another wallpaper would otherwise leave a link behind that
 # still resolves, and the grid would go on offering a theme that is gone.
 cmd_preview_links() {
-    dir=${1:-${XDG_CACHE_HOME:-$HOME/.cache}/qs-theme/previews}
+    dir=${1:-$CACHE_DIR/previews}
     mkdir -p "$dir" || exit 1
     for f in "$dir"/*; do
         { [ -L "$f" ] || [ -f "$f" ]; } && rm -f -- "$f"
