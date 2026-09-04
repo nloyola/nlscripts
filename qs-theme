@@ -28,6 +28,15 @@
 #       library. Refuses a package that does not resolve.
 #   qs-theme remove <name>
 #       Drop a theme. Leaves its wallpapers where they are.
+#   qs-theme inventory
+#       kind<TAB>name<TAB>repository, one theme per line. kind is "user" for
+#       one installed from a package and "stock" for one authored here, which
+#       is the difference between a theme that can be removed and put back and
+#       one that cannot. For the theme manager.
+#   qs-theme preview-links [dir]
+#       Fill dir with <name>.<ext> symlinks to each theme's first wallpaper
+#       and print it. The picker grid is a directory of images, so this is
+#       what makes the themes look like one.
 #
 # WHY A DIRECTORY OF THEMES AND NOT A WALLPAPER. Picking a wallpaper does not
 # retheme anything, here or in Omarchy, whose model this follows: a theme is
@@ -109,7 +118,8 @@ usage() {
     echo "usage: qs-theme set <name> | cycle | list | current | previews
                     | wallpapers [name] | color <key> [fallback]
                     | refresh [--write] [name...]
-                    | install <repo-url> [name] | remove <name>" >&2
+                    | install <repo-url> [name] | remove <name>
+                    | inventory | preview-links [dir]" >&2
     exit 2
 }
 
@@ -842,6 +852,62 @@ cmd_remove() {
     :
 }
 
+# ── The theme manager's two views ────────────────────────────────────────
+# Both exist so the picker has no second opinion about what a theme is. It
+# could scan the theme directory itself, and then a theme installed while it
+# was open, or one whose upstream file it did not know to look for, would put
+# the grid and this script into disagreement about the same question.
+
+# The reverse of raw_colors_url, for the inventory below: a tracked theme
+# knows the file it came from, and what the manager wants to show is the
+# repository that file is in.
+repo_url_for_raw() {
+    case $1 in
+        https://raw.githubusercontent.com/*)
+            printf 'https://github.com/%s\n' \
+                   "$(echo "${1#https://raw.githubusercontent.com/}" | cut -d/ -f1,2)" ;;
+        *)  : ;;
+    esac
+}
+
+# user is a theme that came from a package and can be removed and installed
+# again; stock is one authored here, which cannot be got back once dropped.
+# That is the distinction the manager needs, and tracking an upstream is
+# exactly what tells the two apart.
+cmd_inventory() {
+    for name in $(cmd_list); do
+        if [ -r "$THEME_DIR/themes/$name/upstream" ]; then
+            printf 'user\t%s\t%s\n' "$name" \
+                   "$(repo_url_for_raw "$(upstream_url "$THEME_DIR/themes/$name/upstream")")"
+        else
+            printf 'stock\t%s\t\n' "$name"
+        fi
+    done
+}
+
+# The picker grid draws a directory of image files, so a theme has to look
+# like one to appear in it. Symlinks rather than copies: these are whole
+# wallpapers, and the grid thumbnails them anyway.
+#
+# Rebuilt from empty every time. A theme that has been removed, renamed or
+# repointed at another wallpaper would otherwise leave a link behind that
+# still resolves, and the grid would go on offering a theme that is gone.
+cmd_preview_links() {
+    dir=${1:-${XDG_CACHE_HOME:-$HOME/.cache}/qs-theme/previews}
+    mkdir -p "$dir" || exit 1
+    for f in "$dir"/*; do
+        { [ -L "$f" ] || [ -f "$f" ]; } && rm -f -- "$f"
+    done
+    for name in $(cmd_list); do
+        img=$(expand_wallpapers "$name" | head -1)
+        [ -n "$img" ] || continue
+        ext=${img##*/}
+        case $ext in *.*) ext=.${ext##*.} ;; *) ext="" ;; esac
+        ln -s -- "$img" "$dir/$name$ext" || exit 1
+    done
+    printf '%s\n' "$dir"
+}
+
 case $1 in
     set)     shift; cmd_set "$@" ;;
     cycle)   cmd_cycle ;;
@@ -853,5 +919,7 @@ case $1 in
     refresh) shift; cmd_refresh "$@" ;;
     install) shift; cmd_install "$@" ;;
     remove)  shift; cmd_remove "$@" ;;
+    inventory) cmd_inventory ;;
+    preview-links) shift; cmd_preview_links "$@" ;;
     *)       usage ;;
 esac
