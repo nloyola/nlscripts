@@ -130,12 +130,20 @@ usage() {
                     | wallpapers [name] | color <key> [fallback]
                     | refresh [--write] [name...]
                     | install <repo-url> [name] | remove <name>
+                    | check <repo-url> [name]
                     | inventory
                     | preview-links [--force] [--offline] [dir]" >&2
     exit 2
 }
 
 die() { echo "qs-theme: $*" >&2; exit 1; }
+
+# The two verdicts check returns besides "installable". They are not die
+# because the exit status is the whole point of the command: 4 is a fact
+# about the package and 5 is an admission that nothing was learned about it,
+# and a caller has to show a different thing for each.
+unusable()    { echo "qs-theme: $*" >&2; exit 4; }
+uncheckable() { echo "qs-theme: $1: could not be checked - $2" >&2; exit 5; }
 
 # ── Resolve ──────────────────────────────────────────────────────────────
 # Emit the whole resolved palette for one theme as "key<TAB>value" lines.
@@ -850,6 +858,61 @@ cmd_install() {
     echo "try it with: qs-theme set $name"
 }
 
+# ── Check ────────────────────────────────────────────────────────────────
+# What a GUI asks before it offers a package: would install take this? The
+# answer has to come from the guard install itself applies, or the browser
+# would be holding a second opinion about what a theme is - so this fetches
+# the one file install insists on and puts it through the same resolve, and
+# refuses for the same two reasons in the same words.
+#
+# It fetches rather than clones. install needs the whole package because it
+# copies the backgrounds out, but the verdict only ever turns on colors.toml,
+# and a browser that shallow-cloned every package the cursor landed on would
+# pull tens of megabytes to answer a question about a few kilobytes.
+#
+# Nothing is written anywhere. A question that installed themes by being
+# asked would be worse than no question at all.
+cmd_check() {
+    url=$1
+    [ -n "$url" ] || usage
+    name=${2:-$(repo_theme_name "$url")}
+    case $name in
+        ''|*/*|.*) die "not a usable theme name: $name" ;;
+    esac
+
+    # HEAD is the ref rather than a branch: install learns the default branch
+    # from its clone, and there is no clone here to learn one from. A forge
+    # whose raw layout is unknown is not a verdict about the package - install
+    # would still take it, it simply could not be tracked - so it is 5.
+    raw=$(raw_colors_url "$url" HEAD) ||
+        uncheckable "$url" "no known raw layout for that forge"
+    command -v curl >/dev/null 2>&1 ||
+        uncheckable "$url" "check needs curl"
+
+    work=${TMPDIR:-/tmp}/qs-theme-check.$$
+    mkdir -p "$work/vet/themes/$name" || exit 1
+    trap 'rm -rf "$work"' EXIT INT TERM
+
+    status=$(curl -sL --max-time 30 -o "$work/fetched" -w '%{http_code}' "$raw")
+    case $status in
+        200) ;;
+        404) unusable "$url has no colors.toml at its root" ;;
+        *)   uncheckable "$url" "the fetch answered ${status:-nothing}" ;;
+    esac
+    # Emptiness is checked as well as the status, for the reason refresh
+    # checks it: a proxy or a captive portal answers 200 with nothing, and
+    # nothing does not resolve, so believing the status here would report a
+    # perfectly good package as broken every time the wifi was captive.
+    [ -s "$work/fetched" ] ||
+        uncheckable "$url" "the fetch came back empty"
+
+    cp "$work/fetched" "$work/vet/themes/$name/colors.toml" || exit 1
+    ( THEME_DIR=$work/vet; resolve "$name" >/dev/null ) ||
+        unusable "$url does not resolve as a theme"
+
+    echo "$name: installable"
+}
+
 cmd_remove() {
     name=$1
     [ -n "$name" ] || usage
@@ -1123,6 +1186,7 @@ case $1 in
     refresh) shift; cmd_refresh "$@" ;;
     install) shift; cmd_install "$@" ;;
     remove)  shift; cmd_remove "$@" ;;
+    check)   shift; cmd_check "$@" ;;
     inventory) cmd_inventory ;;
     preview-links) shift; cmd_preview_links "$@" ;;
     *)       usage ;;
