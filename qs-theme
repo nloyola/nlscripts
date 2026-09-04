@@ -46,12 +46,23 @@
 #
 # THE CASCADE. A theme authors ~17 keys and gets ~40, so a template can ask for
 # bright_red or color9 without every theme having to spell them out. In order:
-# the file, then semantic defaults (orange <- yellow, inactive <- dim,
+# the file, then mode, then the Omarchy remap below if the file is one of
+# theirs, then semantic defaults (orange <- yellow, inactive <- dim,
 # critical <- red, cursor <- bright_foreground, selection <- lighter_background,
 # selection_text <- whichever of the foreground and the background contrasts
 # with the selection more), then derived shades by linear mix, then ANSI
-# aliasing, then light/dark mode by luminance. `qs-theme color <key>` is the way to see what any of it
-# resolved to.
+# aliasing. `qs-theme color <key>` is the way to see what any of it resolved
+# to.
+#
+# OMARCHY THEMES. An upstream colors.toml drops into themes/<name>/ verbatim
+# and resolves as itself - see the remap in the awk below for what it renames
+# and what it derives. Of the 22 themes shared with upstream, 11 resolve byte
+# for byte identically to the copies transcribed here by hand; the rest differ
+# only where a deliberate choice was made, and keep that choice by appending
+# the overriding keys to the same file. Those overrides must be written in
+# upstream vocabulary - light_foreground rather than muted - because the two
+# formats disagree about what muted names. gruvbox is not a port at all: its
+# background is authored, not upstream's.
 #
 # QS_THEME_DIR relocates the theme directory, QS_THEME_STATE the generated one,
 # QS_THEME_BOTTOM the btm config, and QS_THEME_DRY=1 renders without touching
@@ -128,6 +139,51 @@ resolve() {
       function have(k) { return (k in A) && A[k] != "" }
       function def(k, v) { if (!have(k)) A[k] = v }
 
+      # ── The Omarchy colors.toml ───────────────────────────────────────
+      # Upstream themes are flat colors.toml files of the same shape as
+      # these, and most of the themes here began as one transcribed by hand.
+      # The transcription was mechanical, so it happens here instead and an
+      # upstream theme drops into themes/ verbatim, updated by a git pull
+      # rather than a re-port.
+      #
+      # The four renames are not cosmetic. `muted` names opposite ends of
+      # the palette in the two formats - here the light one, upstream the
+      # dark one - so a file read without this would put the upstream dark
+      # value everywhere this palette expects its light one, in every
+      # template, silently. light_foreground and dark_foreground exist only
+      # upstream, which is what makes them the discriminator.
+      function omarchy(   hue, i, n, out, seen) {
+          def("dim", A["muted"])                    # before muted is retaken
+          if (have("light_foreground")) A["muted"] = A["light_foreground"]
+          def("inactive", A["dark_foreground"])
+          def("accent2",  A["magenta"])
+          def("rainbow",  "false")                  # no upstream asks for it
+          def("orange",   A["yellow"])              # needed by accents below
+
+          # popup_border has no upstream analogue at all: the accent lifted
+          # toward white, or dropped toward black on a light theme, where a
+          # lifted one would outline the popup in something paler than its
+          # own background.
+          if (!have("popup_border"))
+              A["popup_border"] = (A["mode"] == "light") \
+                  ? mix(A["accent"], "#000000", 0.25) \
+                  : mix(A["accent"], "#ffffff", 0.40)
+
+          # The accent cycle, in the order every hand-port chose. Deduped:
+          # a palette whose accent is also its magenta would otherwise give
+          # the bar the same colour twice in a row.
+          if (!have("accents")) {
+              n = split("accent magenta green orange cyan", hue, " ")
+              out = ""
+              for (i = 1; i <= n; i++) {
+                  if (!have(hue[i]) || (A[hue[i]] in seen)) continue
+                  seen[A[hue[i]]] = 1
+                  out = out (out == "" ? "" : " ") A[hue[i]]
+              }
+              A["accents"] = out
+          }
+      }
+
       # ── the file ────────────────────────────────────────────────────
       # Flat `key = "value"`, line based. Deliberately not a TOML parser:
       # there are no tables, arrays or multi-line strings in a colors.toml,
@@ -151,6 +207,17 @@ resolve() {
       END {
           A["name"] = theme
 
+          # ── mode ─────────────────────────────────────────────────────
+          # An explicit key wins; otherwise the background decides. Resolved
+          # first because the Omarchy remap below derives popup_border in
+          # opposite directions on a light and a dark theme.
+          if (!have("mode")) {
+              lum = comp(A["background"],0) + comp(A["background"],1) + comp(A["background"],2)
+              A["mode"] = (lum > 382) ? "light" : "dark"
+          }
+
+          if (have("light_foreground") || have("dark_foreground")) omarchy()
+
           # Authored keys with no sensible derivation. A theme missing one of
           # these would render a config full of empty colours, so say so.
           split("background foreground lighter_background muted dim accent " \
@@ -173,11 +240,15 @@ resolve() {
           def("critical", A["red"])
 
           # ── derived shades ───────────────────────────────────────────
-          A["dark_background"]   = mix(A["background"], "#000000", 0.25)
-          A["darker_background"] = mix(A["background"], "#000000", 0.50)
+          # def() rather than assignment: an Omarchy theme authors its own
+          # brights and background shades, and they are not always the linear
+          # mix derived here. Where a theme said, its value stands - that is
+          # the part its author tuned by eye.
+          def("dark_background",   mix(A["background"], "#000000", 0.25))
+          def("darker_background", mix(A["background"], "#000000", 0.50))
           split("black red green yellow blue magenta cyan orange foreground white",
                 hue, " ")
-          for (i in hue) A["bright_" hue[i]] = mix(A[hue[i]], "#ffffff", 0.20)
+          for (i in hue) def("bright_" hue[i], mix(A[hue[i]], "#ffffff", 0.20))
 
           def("cursor",    A["bright_foreground"])
           def("selection", A["lighter_background"])
@@ -200,14 +271,6 @@ resolve() {
           for (i = 1; i <= 8; i++) {
               A["color" (i - 1)] = A[ansi[i]]
               A["color" (i + 7)] = A["bright_" ansi[i]]
-          }
-
-          # ── mode ─────────────────────────────────────────────────────
-          # An explicit key wins; otherwise the background decides. Nothing
-          # reads this yet - it is what a light theme would switch on.
-          if (!have("mode")) {
-              lum = comp(A["background"],0) + comp(A["background"],1) + comp(A["background"],2)
-              A["mode"] = (lum > 382) ? "light" : "dark"
           }
 
           # ── the two byte orders of one translucent background ────────
