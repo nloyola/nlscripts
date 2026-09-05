@@ -5,7 +5,7 @@
 #
 # A theme is a named palette (~/.config/theme) that carries a curated list of
 # wallpapers chosen to suit it, the way an Omarchy theme ships a backgrounds/
-# folder. So the login deal is not "any image under ~/Dropbox/wallpapers" any
+# folder. So the login deal is not "any image under ~/wallpapers/library" any
 # more: it is that theme's list, and the desktop stays coherent across a
 # reboot instead of pairing a rose palette with whatever turned up.
 #

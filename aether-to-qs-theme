@@ -45,13 +45,15 @@
 # ~/.config/aether/theme/backgrounds is overwritten by the next Apply Theme,
 # which would silently repoint an existing theme at someone else's picture.
 #
-# QS_THEME_DIR relocates the theme directory (same variable qs-theme reads),
-# AETHER_DIR the Aether output tree, and QS_THEME_WALLPAPER_LIB the wallpaper
-# library the picture is copied into.
+# QS_THEME_DIR relocates the theme directory and QS_THEME_WALLPAPER_LIB the
+# wallpaper library - both the same variables qs-theme reads, and the library
+# means the same thing here as it does there: its root, not the aether subdir
+# under it. AETHER_DIR relocates the Aether output tree.
 
 THEME_DIR=${QS_THEME_DIR:-$HOME/.config/theme}
 AETHER_DIR=${AETHER_DIR:-$HOME/.config/aether/theme}
-WALLPAPER_LIB=${QS_THEME_WALLPAPER_LIB:-$HOME/Dropbox/wallpapers/aether}
+WALLPAPER_LIB=${QS_THEME_WALLPAPER_LIB:-$HOME/wallpapers/library}
+AETHER_LIB=$WALLPAPER_LIB/aether
 
 name=aether
 wallpaper=
@@ -192,21 +194,22 @@ mv "$dest/colors.toml.new" "$dest/colors.toml"
 
 # ── the wallpaper ────────────────────────────────────────────────────────
 if [ -n "$wallpaper" ]; then
-    mkdir -p "$WALLPAPER_LIB" || die "cannot create $WALLPAPER_LIB"
+    mkdir -p "$AETHER_LIB" || die "cannot create $AETHER_LIB"
     # Named after the theme, so a second conversion replaces its own picture
     # instead of littering the library.
     ext=${wallpaper##*.}
     case $ext in
         "$wallpaper"|*[!A-Za-z0-9]*) ext=jpg ;;
     esac
-    copy=$WALLPAPER_LIB/$name.$ext
+    copy=$AETHER_LIB/$name.$ext
     cp -- "$wallpaper" "$copy" || die "cannot copy wallpaper"
 
     {
         echo "# Wallpapers for $name, one glob or path per line. The picture"
         echo "# Aether extracted this palette from, copied out of its output"
         echo "# tree so the next Apply Theme cannot repoint it."
-        echo "$copy" | sed "s|^$HOME|~|"
+        # Through the token, so this theme follows the library if it moves.
+        echo '$WALLPAPERS'"/aether/$name.$ext"
     } > "$dest/wallpapers"
 fi
 

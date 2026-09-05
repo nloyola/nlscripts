@@ -100,18 +100,26 @@
 # than muted - because the two formats disagree about what muted names.
 #
 # QS_THEME_DIR relocates the theme directory, QS_THEME_STATE the generated one,
-# QS_THEME_CACHE the preview cache, QS_THEME_BOTTOM the btm config, and
-# QS_THEME_DRY=1 renders without touching wallpapers or signalling anything -
-# which is what the test script drives.
+# QS_THEME_CACHE the preview cache, QS_THEME_BOTTOM the btm config,
+# QS_THEME_WALLPAPER_LIB the wallpaper library, and QS_THEME_DRY=1 renders
+# without touching wallpapers or signalling anything - which is what the test
+# script drives.
 
 THEME_DIR=${QS_THEME_DIR:-$HOME/.config/theme}
 STATE=${QS_THEME_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/theme}
 BOTTOM_CONFIG=${QS_THEME_BOTTOM:-$HOME/.config/bottom/bottom.toml}
 WALLPAPER=${QS_THEME_WALLPAPER:-$HOME/.local/bin/qs-wallpaper}
-# Where install puts a package's backgrounds. Outside the repo, like every
-# other wallpaper set: the palette is version controlled and the images are
-# not.
-WALLPAPER_LIB=${QS_THEME_WALLPAPER_LIB:-$HOME/Dropbox/wallpapers}
+# The wallpaper library: where install puts a package's backgrounds, and what
+# $WALLPAPERS resolves to in a theme's wallpapers list. Outside the repo, like
+# every other wallpaper set: the palette is version controlled and the images
+# are not. Because the lists name it rather than spell it out, this one line
+# is where the library lives - move it and every theme follows.
+#
+# It is a Syncthing folder (id "wallpapers") rather than a Dropbox one, shared
+# with the machines that run a desktop instead of with the phones and the VPS
+# that the catch-all ~/Sync folder reaches. ~/wallpapers/4k beside it is
+# deliberately not synced.
+WALLPAPER_LIB=${QS_THEME_WALLPAPER_LIB:-$HOME/wallpapers/library}
 # Everything the picker grid is drawn from: fetched screenshots, generated
 # cards and the link farm over them. All of it is derivable from the themes
 # and can be thrown away at any time, which is what makes it a cache.
@@ -471,6 +479,15 @@ expand_wallpapers() {
     IFS=$(printf '\n')
     while read -r line; do
         case $line in ''|\#*) continue ;; esac
+        # The library is one setting, not a path repeated in every list: a
+        # line says $WALLPAPERS and this puts WALLPAPER_LIB there, so moving
+        # the library moves every theme at once. Substituted literally rather
+        # than through the shell, and before globbing, so a filename with
+        # spaces in it survives and nothing else on the line is evaluated.
+        case $line in
+            *'$WALLPAPERS'*)
+                line=${line%%'$WALLPAPERS'*}$WALLPAPER_LIB${line#*'$WALLPAPERS'} ;;
+        esac
         case $line in "~/"*) line=$HOME/${line#\~/} ;; esac
         for f in $line; do
             [ -f "$f" ] && printf '%s\n' "$f"
@@ -858,7 +875,9 @@ cmd_install() {
         {
             echo "# The $n backgrounds shipped with the upstream $name package,"
             echo "# copied out of its repo so nothing here depends on that clone."
-            echo "$WALLPAPER_LIB/$name/$name-*" | sed "s|^$HOME/|~/|"
+            # Named through the token, not spelled out, so a theme installed
+            # today still follows the library if it moves tomorrow.
+            echo '$WALLPAPERS'"/$name/$name-*"
         } > "$dir/wallpapers"
     else
         echo "qs-theme: $name: the package ships no backgrounds/, so it has no wallpapers" >&2
