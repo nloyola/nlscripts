@@ -201,6 +201,19 @@ resolve() {
       function have(k) { return (k in A) && A[k] != "" }
       function def(k, v) { if (!have(k)) A[k] = v }
 
+      # The text drawn on a selection: whichever end of the palette stands
+      # further from the selection itself. A theme is free to author a
+      # selection that sits up near its foreground - the newer Omarchy
+      # colors.toml carries a selection_foreground precisely because several
+      # upstreams do - and a template that hardcoded the foreground here would
+      # render invisible text. Measured, so no theme has to remember.
+      function selection_text_measured() {
+          if (contrast(A["selection"], A["foreground"]) >= contrast(A["selection"], A["background"]))
+              def("selection_text", A["foreground"])
+          else
+              def("selection_text", A["background"])
+      }
+
       # ── The Omarchy colors.toml ───────────────────────────────────────
       # Upstream themes are flat colors.toml files of the same shape as
       # these, and most of the themes here began as one transcribed by hand.
@@ -254,8 +267,16 @@ resolve() {
           n = split("black red green yellow blue magenta cyan white", hue, " ")
           for (i = 1; i <= n; i++) def("bright_" hue[i], A["color" (i + 7)])
 
-          def("selection",      A["selection_background"])
-          def("selection_text", A["selection_foreground"])
+          # selection_foreground names the text drawn on selection_background,
+          # and means nothing apart from it. A theme that authors its own
+          # selection - event-horizon carries both this shape and a Quattro
+          # `selection` - has moved the surface out from under that answer,
+          # and taking the pair apart put its background colour on a highlight
+          # barely a shade lighter than itself: 1.27:1, which is not text.
+          def("selection", A["selection_background"])
+          if (A["selection"] == A["selection_background"])
+              def("selection_text", A["selection_foreground"])
+          selection_text_measured()
 
           # The one key with nothing behind it at all. These packages theme
           # every panel as the background with a border, so there is no
@@ -377,18 +398,7 @@ resolve() {
 
           def("cursor",    A["bright_foreground"])
           def("selection", A["lighter_background"])
-
-          # The text drawn on a selection: whichever end of the palette
-          # stands further from the selection itself. A theme is free to
-          # author a selection that sits up near its foreground - the newer
-          # Omarchy colors.toml carries a selection_foreground precisely
-          # because several upstreams do - and a template that hardcoded the
-          # foreground here would render invisible text. Measured, so no
-          # theme has to remember.
-          if (contrast(A["selection"], A["foreground"]) >= contrast(A["selection"], A["background"]))
-              def("selection_text", A["foreground"])
-          else
-              def("selection_text", A["background"])
+          selection_text_measured()
 
           # ── ANSI aliasing ────────────────────────────────────────────
           # So the terminal templates can name color0..color15 unconditionally.
