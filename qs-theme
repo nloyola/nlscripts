@@ -972,14 +972,33 @@ have_fetcher() {
 #
 # A cached screenshot is kept indefinitely: an upstream author repaints a
 # palette far more often than they reshoot the desktop, and --force is there
-# for when they do. A failed fetch leaves nothing at all - no partial file and
-# no marker saying it was tried - so a theme that was unreachable this time is
-# retried on the next run rather than left with a card for ever.
+# for when they do.
+#
+# WHY A FAILURE IS REMEMBERED. Several tracked packages publish no preview.png
+# at all, and this runs on the open path: the picker cannot draw its grid until
+# preview-links has returned, so every one of those themes used to put a
+# network round trip between the keybind and the window. Two of them on this
+# desktop, ~110ms each on a good connection and unbounded on a bad one, paid
+# again on every single open.
+#
+# So a failed fetch now leaves a marker beside where the screenshot would go,
+# and the theme is not asked about again for a day. Still no partial file, and
+# still not a card for ever - a package that gains a screenshot is picked up by
+# the next day's first open, or immediately with --force. RETRY_AFTER is in
+# minutes because that is the unit find takes.
+PREVIEW_RETRY_AFTER=1440
+
 cache_preview_image() {
     name=$1
     force=$2
     dest=$PREVIEW_IMAGE_DIR/$name.png
+    missed=$PREVIEW_IMAGE_DIR/$name.missing
     [ "$force" = 1 ] || [ ! -s "$dest" ] || return 0
+
+    if [ "$force" != 1 ] && [ -e "$missed" ] &&
+       [ -z "$(find "$missed" -mmin +$PREVIEW_RETRY_AFTER 2>/dev/null)" ]; then
+        return 1
+    fi
 
     [ -r "$THEME_DIR/themes/$name/upstream" ] || return 1
     url=$(preview_image_url "$(upstream_url "$THEME_DIR/themes/$name/upstream")") ||
@@ -991,9 +1010,13 @@ cache_preview_image() {
     mkdir -p "$PREVIEW_IMAGE_DIR" || return 1
     part=$dest.part.$$
     if fetch_upstream "$url" > "$part" 2>/dev/null && [ -s "$part" ]; then
-        mv -f -- "$part" "$dest" && return 0
+        if mv -f -- "$part" "$dest"; then
+            rm -f -- "$missed"
+            return 0
+        fi
     fi
     rm -f -- "$part"
+    : > "$missed"
     return 1
 }
 
