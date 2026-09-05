@@ -248,6 +248,24 @@ cmd_set() {
         echo "qs-wallpaper: no such enabled monitor: $target" >&2; exit 3; }
     [ -r "$file" ] || { echo "qs-wallpaper: cannot read: $file" >&2; exit 3; }
 
+    # Refused rather than remembered. The state file is what the bar paints
+    # from, into an Image, so a path it cannot decode - a video, and Omarchy
+    # packages do ship those beside their stills - is a black monitor and not
+    # one word anywhere about why.
+    #
+    # Wider than the list `random` deals from, deliberately. This is the door
+    # an explicit pick comes through, so it may only refuse what genuinely
+    # cannot be painted: gif and bmp are what the picker grid offers (list.sh)
+    # and what the bar's Image decodes, so refusing them here would reject a
+    # wallpaper that works. Dealing automatically is the narrower question -
+    # an animated gif is a poor thing to land on at login - and `random` and
+    # auto-wall answer it for themselves.
+    case $file in
+        *.jpg|*.jpeg|*.png|*.webp|*.gif|*.bmp) ;;
+        *.JPG|*.JPEG|*.PNG|*.WEBP|*.GIF|*.BMP) ;;
+        *) echo "qs-wallpaper: not a still image: $file" >&2; exit 3 ;;
+    esac
+
     case $file in /*) ;; *) file=$(cd "$(dirname "$file")" && pwd)/$(basename "$file") ;; esac
 
     remember "$target" "$file"

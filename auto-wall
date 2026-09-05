@@ -39,20 +39,33 @@ list=$THEME_DIR/themes/$name/wallpapers
 # expanded. IFS is newline only so a path with spaces in it survives a line
 # with no glob characters, while a glob's matches still come out as separate
 # words.
+#
+# STILL IMAGES ONLY. A theme's backgrounds/ is whatever its package shipped,
+# and an Omarchy package may ship video wallpapers beside the stills -
+# event-horizon carries six .mp4/.webm among sixteen files. Nothing in this
+# desktop paints a video: the bar draws the state file's path into an Image,
+# so dealing one puts a black screen on that monitor and no error anywhere.
+# The glob in the theme's list cannot express the difference - it is one
+# `event-horizon-*` line - so the filter has to be here, on the same
+# extensions `qs-wallpaper random` deals from, the sibling of this pass.
 pool=()
 if [ -r "$list" ]; then
     while IFS= read -r line; do
         case $line in ''|\#*) continue ;; esac
         case $line in "~/"*) line=$HOME/${line#\~/} ;; esac
         for f in $line; do
-            [ -f "$f" ] && pool+=("$f")
+            [ -f "$f" ] || continue
+            case ${f##*.} in
+                jpg|jpeg|png|webp|JPG|JPEG|PNG|WEBP) pool+=("$f") ;;
+            esac
         done
     done < "$list"
 fi
 
-# No theme list, or every file in it has moved: leave the wallpapers alone
-# rather than dealing something off-theme. The remembered ones are already on
-# screen (X11 restores them from ~/.fehbg, Wayland from the state file).
+# No theme list, every file in it has moved, or the theme ships nothing but
+# video: leave the wallpapers alone rather than dealing something off-theme.
+# The remembered ones are already on screen (X11 restores them from ~/.fehbg,
+# Wayland from the state file).
 [ ${#pool[@]} -gt 0 ] || exit 0
 
 # Shuffled once and dealt out, so two monitors never land on the same image
