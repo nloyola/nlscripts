@@ -340,10 +340,24 @@ restore_routes() {
   rm -f "$STATE_FILE"
 }
 
+require_forticlient() {
+  # FortiClient Linux is a registration-gated manual install, so it is
+  # not on every host this script can now reach. Check before anything else in
+  # `connect`: everything below deletes the default route and relies on the EXIT
+  # trap to put it back, so discovering the binary is missing at the `spawn`
+  # line would cost a round trip through being offline for no reason at all.
+  [ -x /opt/forticlient/fortivpn ] && return 0
+  echo "su_vpn.sh: /opt/forticlient/fortivpn is not installed." >&2
+  echo "su_vpn.sh: FortiClient Linux is a manual, registration-gated download -" >&2
+  echo "su_vpn.sh: https://www.fortinet.com/support/product-downloads" >&2
+  return 1
+}
+
 case "$ACTION" in
   connect)
     # Check credentials before touching any routes: a bad pass entry must fail
     # while the network is still intact, not after we have deleted the default.
+    require_forticlient || exit 1
     check_pass_entry || exit 1
     warn_if_tailscale_exit_node
     remove_stale_vpn_addrs
