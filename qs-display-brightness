@@ -2,19 +2,35 @@
 # Per-monitor backlight brightness for the quickshell display chip.
 #
 #   qs-display-brightness list
-#       Emit one JSON line for every enabled output whose monitor answers
-#       DDC/CI:
+#       Emit one JSON line for every enabled output whose backlight can be
+#       driven:
 #
 #         {"outputs":[{"name":"DP-0","brightness":55}]}
 #
-#       Outputs that do not answer are omitted rather than reported at 0, so
-#       the chip can simply leave the slider out for them.
+#       Outputs that answer neither way are omitted rather than reported at 0,
+#       so the chip can simply leave the slider out for them.
 #
 #   qs-display-brightness set <output> <percent>
 #       Set that monitor's backlight to <percent> (0-100).
 #
-# This is the real backlight over DDC/CI, not xrandr's --brightness, which
-# only fades the gamma ramp and leaves the panel as bright as it was.
+# This is the real backlight, not xrandr's --brightness, which only fades the
+# gamma ramp and leaves the panel as bright as it was.
+#
+# TWO KINDS OF BACKLIGHT. An external monitor is driven over DDC/CI, which is
+# what everything below about ddcutil and bus mapping is for. A laptop panel is
+# not: it has no DDC/CI brightness control at all and is driven through
+# /sys/class/backlight instead. This script knew only the first kind, so on
+# gudrun - a laptop, whose only display is the internal eDP-1 - `list` returned
+# an empty set and the display popup drew no brightness slider whatsoever. A
+# sysfs backlight is checked for first, per output, because where both exist the
+# internal one is the authoritative control for that panel.
+#
+# Writes to a sysfs backlight go through brightnessctl rather than to the file:
+# the same tool the brightness keys use (see qs-osd), so there is one story
+# about permissions instead of two. Note that it needs one - the udev rule
+# brightnessctl ships makes /sys/class/backlight/*/brightness group-writable by
+# `video`, so the user has to BE in the video group. Without it reads still work
+# and the slider appears, but every write is refused.
 #
 # MAPPING: ddcutil knows monitors by I2C bus and DRM connector, and how those
 # line up with the compositor's output names depends on the session:
@@ -41,9 +57,11 @@
 #
 # QS_BRIGHTNESS_XRANDR, QS_BRIGHTNESS_HYPRCTL and QS_BRIGHTNESS_DETECT name
 # files to read instead of running xrandr, hyprctl and ddcutil (the first two
-# also force which session path is taken), QS_BRIGHTNESS_CACHE relocates the
-# cache, and QS_BRIGHTNESS_DRY=1 prints the ddcutil write instead of making it,
-# so the parsing and mapping can be driven from fixtures.
+# also force which session path is taken), QS_BRIGHTNESS_BACKLIGHTS names one
+# holding "<connector>\t<device>" lines instead of walking /sys/class/backlight,
+# QS_BRIGHTNESS_CACHE relocates the cache, and QS_BRIGHTNESS_DRY=1 prints the
+# write instead of making it, so the parsing and mapping can be driven from
+# fixtures.
 
 VCP_BRIGHTNESS=10
 
@@ -112,6 +130,43 @@ outputs() {
     fi
 }
 
+# "<DRM connector>\t<backlight device>" for every panel under
+# /sys/class/backlight. The `device` symlink points at the DRM connector the
+# panel belongs to - amdgpu_bl1 -> ../../card1-eDP-1 - so stripping the card
+# prefix gives exactly the name Hyprland uses for that output, and the pairing
+# is an exact match with nothing to guess at.
+#
+# Older drivers point that symlink at the PCI device instead (intel_backlight ->
+# ../../card0), which names no connector. Those are keyed "*": a machine has one
+# internal panel, so a backlight that cannot say which output it belongs to can
+# only belong to the internal one - and backlight_for only consults that key for
+# an output whose name says it is internal.
+backlights() {
+    if [ -n "$QS_BRIGHTNESS_BACKLIGHTS" ]; then cat "$QS_BRIGHTNESS_BACKLIGHTS"; return; fi
+    for dev in /sys/class/backlight/*; do
+        [ -d "$dev" ] || continue
+        node=$(readlink -f "$dev/device" 2>/dev/null) || continue
+        conn=${node##*/}
+        case $conn in
+            card[0-9]*-*) conn=${conn#*-} ;;
+            *)            conn='*' ;;
+        esac
+        printf '%s\t%s\n' "$conn" "${dev##*/}"
+    done
+}
+
+# The backlight device driving <output>, empty if none does. eDP/LVDS/DSI are
+# the connector types a built-in panel hangs off; an external monitor must never
+# fall through to the "*" entry, or plugging a laptop into a screen would have
+# the bar's slider for that screen silently dimming the laptop's own panel.
+backlight_for() {
+    backlights | awk -v want="$1" -F "\t" '
+      $1 == want                                { print $2; exit }
+      $1 == "*" && want ~ /^(eDP|LVDS|DSI)/     { fallback = $2 }
+      END { if (fallback != "") print fallback }
+    '
+}
+
 # "<key>\t<i2c bus>" for every display ddcutil can talk to, emitted once per
 # key the two output sources can ask by: the bare DRM connector and the binary
 # serial. A connector is never all-digits, so the two key spaces cannot collide.
@@ -153,6 +208,22 @@ cmd_list() {
     printf '{"outputs":['
     first=1
     outputs | while IFS="$(printf '\t')" read -r name serial; do
+        # A panel with its own sysfs backlight is driven there and never over
+        # DDC/CI, which it does not implement anyway.
+        dev=$(backlight_for "$name")
+        if [ -n "$dev" ]; then
+            # "amdgpu_bl1,backlight,19172,31%,62451" - field 4 is the percent
+            # already rounded, which is the only field this needs.
+            pct=$(brightnessctl --class=backlight --device="$dev" -m 2>/dev/null \
+                  | awk -F, 'NR == 1 { gsub(/%/, "", $4); print $4 }')
+            case $pct in '' | *[!0-9]*) continue ;; esac
+
+            [ "$first" = 1 ] || printf ','
+            first=0
+            printf '{"name":"%s","brightness":%d}' "$name" "$pct"
+            continue
+        fi
+
         bus=$(echo "$map" | awk -v want="$serial" '$1 == want { print $2; exit }')
         [ -n "$bus" ] || continue
 
@@ -180,6 +251,21 @@ cmd_set() {
 
     serial=$(outputs | awk -v want="$target" -F "\t" '$1 == want { print $2; exit }')
     [ -n "$serial" ] || { echo "qs-display-brightness: no such enabled output: $target" >&2; exit 3; }
+
+    # Same order as cmd_list: sysfs backlight first, DDC/CI only for a monitor
+    # that has none. brightnessctl's stderr is deliberately not discarded - the
+    # one thing that goes wrong here is a permission denial from not being in
+    # the video group, and swallowing it is what makes a dead slider look like
+    # a broken script.
+    dev=$(backlight_for "$target")
+    if [ -n "$dev" ]; then
+        if [ "$QS_BRIGHTNESS_DRY" = 1 ]; then
+            echo "brightnessctl --class=backlight --device=$dev set $percent%"
+        else
+            brightnessctl --class=backlight --device="$dev" set "$percent%" >/dev/null
+        fi
+        return
+    fi
 
     bus=$(bus_for "$serial")
     [ -n "$bus" ] || { echo "qs-display-brightness: $target does not answer DDC/CI" >&2; exit 3; }
