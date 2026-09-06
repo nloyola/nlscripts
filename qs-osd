@@ -1,0 +1,114 @@
+#!/bin/sh
+# qs-osd - volume and brightness keys, with the on-screen readout the bar draws.
+#
+# Every change is written as one JSON line to
+# $XDG_RUNTIME_DIR/quickshell-osd.json; the quickshell bar watches that file and
+# raises the OSD. Nothing here draws anything itself, so the keys still work
+# (silently) with the bar down.
+#
+# BRIGHTNESS TAKES WHICHEVER PATH THE HOST HAS, in this order:
+#
+#   brightnessctl --class=backlight   a real backlight device under
+#                                     /sys/class/backlight. This is gudrun's
+#                                     path (amdgpu_bl1, the eDP panel).
+#   ddcutil                           DDC/CI over i2c, which is how an external
+#                                     monitor's own backlight is driven. This
+#                                     is asterix's path: two desktop 4K heads
+#                                     and no backlight device at all, where
+#                                     `brightnessctl --class=backlight --list`
+#                                     exits 1 and the branch falls through.
+#
+# The order matters and is not arbitrary: a laptop with an external monitor
+# attached has both, and the internal panel is the one the brightness keys are
+# expected to move.
+
+state_file="${XDG_RUNTIME_DIR:-/tmp}/quickshell-osd.json"
+
+write_osd() {
+  kind=$1
+  value=$2
+  label=$3
+  icon=$4
+  printf '{"kind":"%s","value":%s,"label":"%s","icon":"%s","time":%s}\n' \
+    "$kind" "$value" "$label" "$icon" "$(date +%s%3N)" > "$state_file"
+}
+
+volume_value() {
+  pulsemixer --get-volume 2>/dev/null | awk '{print int(($1 + $2) / 2)}'
+}
+
+ddc_displays() {
+  ddcutil detect 2>/dev/null | awk '/^Display [0-9]+/ {print $2}'
+}
+
+ddc_brightness() {
+  ddcutil --display 1 getvcp 10 2>/dev/null | awk -F'current value = |,' '/current value/ {print $2; exit}'
+}
+
+ddc_set_all() {
+  value=$1
+  displays=$(ddc_displays)
+  [ -z "$displays" ] && return 1
+
+  for display in $displays; do
+    ddcutil --display "$display" setvcp 10 "$value" >/dev/null 2>&1 &
+  done
+  wait
+}
+
+case "$1" in
+  volume-up)
+    pulsemixer --change-volume +2
+    value=$(volume_value)
+    write_osd volume "${value:-0}" "Volume ${value:-0}%" ""
+    ;;
+  volume-down)
+    pulsemixer --change-volume -2
+    value=$(volume_value)
+    write_osd volume "${value:-0}" "Volume ${value:-0}%" ""
+    ;;
+  volume-mute)
+    pulsemixer --toggle-mute
+    muted=$(pulsemixer --get-mute 2>/dev/null)
+    value=$(volume_value)
+    if [ "$muted" = "1" ]; then
+      write_osd volume 0 "Muted" "󰝟"
+    else
+      write_osd volume "${value:-0}" "Volume ${value:-0}%" ""
+    fi
+    ;;
+  brightness-up)
+    if brightnessctl --class=backlight --list >/dev/null 2>&1; then
+      brightnessctl --class=backlight set 5%+ >/dev/null
+      value=$(brightnessctl --class=backlight -m | awk -F, 'NR==1 {gsub(/%/, "", $4); print $4}')
+      write_osd brightness "${value:-0}" "Brightness ${value:-0}%" "󰃠"
+    elif command -v ddcutil >/dev/null 2>&1; then
+      current=$(ddc_brightness)
+      value=$(( ${current:-0} + 5 ))
+      [ "$value" -gt 100 ] && value=100
+      ddc_set_all "$value"
+      write_osd brightness "$value" "Brightness ${value}%" "󰃠"
+    else
+      write_osd brightness 0 "No backlight device" "󰃠"
+    fi
+    ;;
+  brightness-down)
+    if brightnessctl --class=backlight --list >/dev/null 2>&1; then
+      brightnessctl --class=backlight set 5%- >/dev/null
+      value=$(brightnessctl --class=backlight -m | awk -F, 'NR==1 {gsub(/%/, "", $4); print $4}')
+      write_osd brightness "${value:-0}" "Brightness ${value:-0}%" "󰃞"
+    elif command -v ddcutil >/dev/null 2>&1; then
+      current=$(ddc_brightness)
+      value=$(( ${current:-0} - 5 ))
+      [ "$value" -lt 0 ] && value=0
+      ddc_set_all "$value"
+      write_osd brightness "$value" "Brightness ${value}%" "󰃞"
+    else
+      write_osd brightness 0 "No backlight device" "󰃞"
+    fi
+    ;;
+  *)
+    echo "usage: qs-osd volume-up|volume-down|volume-mute|brightness-up|brightness-down" >&2
+    exit 2
+    ;;
+esac
