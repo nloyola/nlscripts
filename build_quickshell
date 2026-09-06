@@ -46,12 +46,21 @@ install_build_dependencies() {
     # Common to both hosts. Everything here exists under the same name in
     # Debian trixie and Ubuntu 26.04.
     #
-    # The pipewire, pam, glib/polkit and xcb entries are new here. They back
-    # features quickshell enables by DEFAULT - SERVICE_PIPEWIRE, SERVICE_PAM,
-    # SERVICE_POLKIT and X11 - so a missing one is a configure failure, not a
-    # smaller binary. They went unlisted for as long as this script had one
-    # host, because asterix already had them installed for other reasons, which
-    # is exactly the sort of thing a second host discovers.
+    # The pipewire, pam, glib/polkit, xcb, gbm and egl entries are new here.
+    # They back features quickshell enables by DEFAULT - SERVICE_PIPEWIRE,
+    # SERVICE_PAM, SERVICE_POLKIT, X11, and the Wayland buffer code in
+    # src/wayland/buffer, which pkg-config's `libdrm;gbm;egl` for - so a missing
+    # one is a configure failure, not a smaller binary. They went unlisted for
+    # as long as this script had one host, because asterix already had them
+    # installed for other reasons, which is exactly the sort of thing a second
+    # host discovers.
+    #
+    # gbm is the one that actually bit: libdrm-dev does NOT pull it, mesa ships
+    # it separately as libgbm-dev, and the configure failure it causes
+    # (`Package 'gbm' not found`) arrives AFTER cmake has written CMakeCache.txt
+    # with a healthy-looking feature list, so the run looks like it got much
+    # further than it did. Nothing generates build.ninja, and the next
+    # `cmake --build` says only `loading 'build.ninja': No such file`.
     echo ">>> Installing build dependencies..."
     sudo apt install -y \
         cmake \
@@ -65,6 +74,8 @@ install_build_dependencies() {
         qt6-wayland-dev \
         qt6-wayland-private-dev \
         libdrm-dev \
+        libgbm-dev \
+        libegl-dev \
         libwayland-dev \
         libjemalloc-dev \
         libcli11-dev \
