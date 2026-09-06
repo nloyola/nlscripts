@@ -18,6 +18,21 @@ set -euo pipefail
 # NOTE: quickshell links private Qt APIs and MUST be rebuilt after every Qt
 # update, or it will crash on an ABI mismatch. If the bar starts crashing after
 # an apt upgrade that touched qt6, re-run this script first.
+#
+# That obligation is now per-host: this runs on asterix (Debian trixie, Qt 6.8)
+# and on gudrun (Ubuntu 26.04, Qt 6.10), whose Qt moves on a different cadence,
+# so the two will need rebuilds at different times. The build itself branches on
+# the distribution in exactly two places - the dependency list and the crash
+# handler - and is otherwise identical on purpose.
+
+# Which distribution this is running on. The dependency set and one build flag
+# differ between asterix (Debian trixie) and gudrun (Ubuntu 26.04); everything
+# else about the build is deliberately identical, so that one script serves both
+# and the two hosts cannot drift into different quickshell feature sets.
+distro_id() {
+    # shellcheck disable=SC1091
+    . /etc/os-release 2>/dev/null && echo "${ID:-unknown}"
+}
 
 DEST=$HOME/src/quickshell
 REPO=https://git.outfoxxed.me/quickshell/quickshell
@@ -28,10 +43,15 @@ install_build_dependencies() {
     echo ">>> Updating apt package metadata..."
     sudo apt update
 
-    # Qt here is 6.8.x, which is before the 6.10 release that folded the
-    # wayland bits into qt6declarative, so qt6-wayland and its private headers
-    # are both still required. Everything else in this list was already present
-    # for the previous X11-only build.
+    # Common to both hosts. Everything here exists under the same name in
+    # Debian trixie and Ubuntu 26.04.
+    #
+    # The pipewire, pam, glib/polkit and xcb entries are new here. They back
+    # features quickshell enables by DEFAULT - SERVICE_PIPEWIRE, SERVICE_PAM,
+    # SERVICE_POLKIT and X11 - so a missing one is a configure failure, not a
+    # smaller binary. They went unlisted for as long as this script had one
+    # host, because asterix already had them installed for other reasons, which
+    # is exactly the sort of thing a second host discovers.
     echo ">>> Installing build dependencies..."
     sudo apt install -y \
         cmake \
@@ -46,32 +66,43 @@ install_build_dependencies() {
         qt6-wayland-private-dev \
         libdrm-dev \
         libwayland-dev \
-        wayland-protocols \
         libjemalloc-dev \
         libcli11-dev \
+        libpipewire-0.3-dev \
+        libpam0g-dev \
+        libglib2.0-dev \
         libpolkit-agent-1-dev \
+        libpolkit-gobject-1-dev \
+        libxcb1-dev \
         spirv-tools
 
-    # cpptrace backs quickshell's crash handler, which upstream asks packagers
-    # to leave enabled. Trixie proper has no libcpptrace-dev; backports does
-    # (1.0.4), and that suite is already enabled on this host because Hyprland
-    # itself comes from it - see ansible/host_vars/asterix.yml. Backports is
-    # NotAutomatic, so it needs an explicit target release rather than joining
-    # the call above.
-    # Two packages that trixie proper cannot satisfy for a Wayland-enabled
-    # build. Backports is already enabled on this host because Hyprland comes
-    # from it (see ansible/host_vars/asterix.yml), and being NotAutomatic it
-    # needs an explicit target release rather than joining the call above.
+    # Two dependencies that differ by distribution, both only needed because
+    # this is a WAYLAND=ON build (the old X11-only build compiled no protocol
+    # files and had no crash handler dependency to satisfy).
     #
-    #   libcpptrace-dev   backs the crash handler, which upstream asks
-    #                     packagers to leave enabled. Not in trixie at all.
-    #   wayland-protocols quickshell master references the ext-background-effect
-    #                     staging protocol, which first ships in 1.45; trixie
-    #                     has 1.44, backports has 1.47. This only bites with
-    #                     WAYLAND=ON - the old X11-only build compiled no
-    #                     protocol files and so never needed it.
-    echo ">>> Installing cpptrace and newer wayland-protocols from backports..."
-    sudo apt install -y -t trixie-backports libcpptrace-dev wayland-protocols
+    #   wayland-protocols  quickshell master references the ext-background-effect
+    #                      staging protocol, which first ships in 1.45.
+    #   libcpptrace-dev    backs the crash handler, which upstream asks
+    #                      packagers to leave enabled.
+    if [[ "$(distro_id)" == ubuntu ]]; then
+        # Ubuntu 26.04 carries wayland-protocols 1.47 in the ordinary archive,
+        # so it joins the call above rather than needing a target release.
+        #
+        # It has NO libcpptrace-dev at any version, so the crash handler cannot
+        # be built here and is turned off in configure() instead. That is a
+        # smaller loss than it sounds: it costs a symbolised backtrace on a
+        # crash, not any runtime behaviour.
+        echo ">>> Ubuntu: wayland-protocols from the archive; no cpptrace available..."
+        sudo apt install -y wayland-protocols
+    else
+        # Trixie proper has neither at a usable version: no libcpptrace-dev at
+        # all, and wayland-protocols 1.44. Backports has 1.0.4 and 1.47, and is
+        # already enabled on asterix because Hyprland itself comes from it (see
+        # ansible/host_vars/asterix.yml). Being NotAutomatic it needs an
+        # explicit target release rather than joining the call above.
+        echo ">>> Debian: cpptrace and newer wayland-protocols from backports..."
+        sudo apt install -y -t trixie-backports libcpptrace-dev wayland-protocols
+    fi
 }
 
 # Deliberately does NOT pull by default, unlike the other build_* scripts.
@@ -103,11 +134,24 @@ configure() {
         rm -rf "$BUILD_DIR"
     fi
 
-    echo ">>> Configuring..."
+    # The X11 and I3 features stay ON on BOTH hosts, even though gudrun has no
+    # i3 session to use them. Keeping the flags identical is what keeps this one
+    # script honest: the two hosts then run the same build with the same feature
+    # set, and a bar that works on one cannot fail on the other for a reason
+    # nobody wrote down. A smaller binary is not worth that.
+    local crash=ON distributor="Local Debian Trixie i3+Hyprland build"
+    if [[ "$(distro_id)" == ubuntu ]]; then
+        # No libcpptrace-dev in the Ubuntu archive; see install_build_dependencies.
+        crash=OFF
+        distributor="Local Ubuntu i3+Hyprland build"
+    fi
+
+    echo ">>> Configuring (crash handler: $crash)..."
     cmake -GNinja -B "$BUILD_DIR" -S "$DEST" \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX="$PREFIX" \
-        -DDISTRIBUTOR="Local Debian Trixie i3+Hyprland build" \
+        -DDISTRIBUTOR="$distributor" \
+        -DCRASH_HANDLER="$crash" \
         -DWAYLAND=ON \
         -DHYPRLAND=ON \
         -DX11=ON \
