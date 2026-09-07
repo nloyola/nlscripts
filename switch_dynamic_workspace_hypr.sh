@@ -9,7 +9,8 @@
 # Argument $1 is the key number (1-9), "next"/"prev" for a relative switch, or
 #   "@<num>" for an already-absolute workspace number (the quickshell bar's
 #   workspace pills know the real number and need no mapping)
-# Argument $2 is "move" to send the focused window instead of following it
+# Argument $2 is "move" to send the focused window and follow it across, or
+#   "movesilent" to send it and stay put (Omarchy's $mod+SHIFT+ALT+<n>)
 #
 # WHY THIS EXISTS RATHER THAN A PORT OF switch_dynamic_workspace_sway.sh:
 # that script branches on the focused output being "DP-0", which is the X11/i3
@@ -41,10 +42,17 @@ case "${1:-}" in
         ;;
 esac
 
-if [ "${2:-}" = "move" ]; then
-    # movetoworkspace follows the window across; use movetoworkspacesilent to
-    # stay put. sway's binding followed, so this matches it.
-    hyprctl dispatch movetoworkspace "$TARGET"
-else
-    hyprctl dispatch workspace "$TARGET"
-fi
+case "${2:-}" in
+    move)
+        # Follows the window across, which is what the i3 binding did.
+        hyprctl dispatch movetoworkspace "$TARGET"
+        ;;
+    movesilent)
+        # Omarchy's "move there without following" ($mod+SHIFT+ALT+<n>): the
+        # window lands on the target set and focus stays where it is.
+        hyprctl dispatch movetoworkspacesilent "$TARGET"
+        ;;
+    *)
+        hyprctl dispatch workspace "$TARGET"
+        ;;
+esac

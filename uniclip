@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# uniclip - Omarchy's universal clipboard, for a hyprlang config.
+#
+# Omarchy binds $mod+C/V/X to one copy/paste/cut pair that works everywhere:
+# in a GUI app the chord is Ctrl+C, but a terminal needs Ctrl+Insert, because
+# Ctrl+C there is SIGINT. Upstream decides between them from Lua, reading a
+# `terminal` tag off the focused window (default/hypr/bindings/clipboard.lua).
+#
+# Hyprland's Lua config is not available on both hosts yet - gudrun runs
+# 0.53.3 - so the same test is done here against the focused window's class,
+# and the chord is injected with `dispatch sendshortcut`, which every version
+# in play has.
+#
+# Usage: uniclip copy|paste|cut
+#
+# WHY THE WINDOW TARGET IS EMPTY: sendshortcut takes MOD,key,window. Naming a
+# window would skip layer-shell surfaces - the quickshell menu and panels are
+# layer surfaces, not windows, and a copy inside the menu's search field has to
+# work too. The empty third field sends to whatever holds focus.
+
+set -euo pipefail
+
+# Window classes that want the terminal chords. Matched case-insensitively as
+# a whole word, so `qs-btm` (the bar's `alacritty --class qs-btm`) is caught by
+# its own entry rather than by accident.
+TERMINAL_CLASSES=(
+    Alacritty
+    qs-btm
+    com.mitchellh.ghostty
+    ghostty
+    foot
+    kitty
+    org.wezfurlong.wezterm
+    XTerm
+)
+
+usage() {
+    printf 'usage: %s copy|paste|cut\n' "${0##*/}" >&2
+    exit 64
+}
+
+active_is_terminal() {
+    local class
+    # An empty or absent class - no window focused, or a layer surface has it -
+    # is not a terminal, and the GUI chord is the right default there.
+    class=$(hyprctl activewindow -j 2>/dev/null | jq -r '.class // ""') || return 1
+    [ -n "$class" ] || return 1
+
+    local candidate
+    for candidate in "${TERMINAL_CLASSES[@]}"; do
+        if [ "${class,,}" = "${candidate,,}" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+send() {
+    # $1 mods, $2 key. The trailing comma is the empty window target.
+    hyprctl dispatch sendshortcut "$1,$2," >/dev/null
+}
+
+case "${1:-}" in
+    copy)
+        if active_is_terminal; then send CTRL insert; else send CTRL c; fi
+        ;;
+    paste)
+        if active_is_terminal; then send SHIFT insert; else send CTRL v; fi
+        ;;
+    cut)
+        # No terminal variant: a terminal has nothing to cut, and Ctrl+X in one
+        # is a live prefix key (readline, tmux, Emacs), so sending the terminal
+        # chord would fire a command rather than do nothing. Upstream sends
+        # Ctrl+X unconditionally and this matches.
+        send CTRL x
+        ;;
+    *)
+        usage
+        ;;
+esac
