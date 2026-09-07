@@ -520,6 +520,38 @@ deal_wallpapers() {
     done
 }
 
+# ── Hyprland layout ──────────────────────────────────────────────────────
+# WHY A THEME HAS TO PUT THE LAYOUT BACK. general:layout is config state, and
+# $mod+L (hypr/layout-toggle.sh) rotates it with `hyprctl keyword`, which lives
+# only in the running compositor. Hyprland watches the files it sources and
+# reloads itself when one of their contents changes - so the moment `set` moves
+# the rendered hypr-colors.conf into place, before this script has called
+# hyprctl at all, the compositor re-reads its config and general:layout goes
+# back to whatever that says. On gudrun that is scrolling, so every theme
+# switch threw the session into columns whatever it had been in.
+#
+# Saved before the first file is written and put back after the last reload,
+# because both the write and the explicit reload reset it. A reload run by hand
+# still does, which is the escape hatch layout-toggle.sh documents; this only
+# covers the reloads a theme switch causes.
+#
+# Read off the plain output rather than `-j`: nothing else in this script needs
+# jq, and one sed is a smaller dependency than a JSON parser.
+hypr_layout_save() {
+    hypr_layout=""
+    command -v hyprctl >/dev/null || return 0
+    hypr_layout=$(hyprctl getoption general:layout 2>/dev/null |
+                      sed -n 's/^str: //p')
+}
+
+hypr_layout_restore() {
+    [ -n "$hypr_layout" ] || return 0
+    hypr_layout_now=$(hyprctl getoption general:layout 2>/dev/null |
+                          sed -n 's/^str: //p')
+    [ "$hypr_layout_now" = "$hypr_layout" ] && return 0
+    hyprctl keyword general:layout "$hypr_layout" >/dev/null 2>&1
+}
+
 # ── Reload ───────────────────────────────────────────────────────────────
 # Every one of these is a no-op when the app is not running, which is every X
 # session and every TTY, so none of them is guarded by a session check.
@@ -611,6 +643,8 @@ cmd_set() {
     [ -n "$name" ] || usage
     [ -r "$THEME_DIR/themes/$name/colors.toml" ] || die "no such theme: $name"
 
+    hypr_layout_save
+
     work=${TMPDIR:-/tmp}/qs-theme.$$
     mkdir -p "$work" || exit 1
     trap 'rm -rf "$work"' EXIT INT TERM
@@ -644,10 +678,14 @@ cmd_set() {
             cp -- "$STATE/bottom.toml" "$BOTTOM_CONFIG"
     fi
 
-    [ "$QS_THEME_DRY" = 1 ] && return 0
+    if [ "$QS_THEME_DRY" != 1 ]; then
+        deal_wallpapers "$name"
+        reload_consumers
+    fi
 
-    deal_wallpapers "$name"
-    reload_consumers
+    # After the writes above and after reload_consumers, because each of them
+    # reloads the compositor and each reload resets the layout.
+    hypr_layout_restore
 }
 
 # ── Refresh ──────────────────────────────────────────────────────────────
