@@ -1,0 +1,94 @@
+#!/bin/sh
+# Emit the state of this host's wireless radio as one JSON line for the
+# quickshell wifi button:
+#
+#   {"dev":"wlp1s0","up":true,"ssid":"skynet","bssid":"d4:5d:64:8b:ba:44",
+#    "signal":-53,"freq":5180,"band":"5 GHz","chan":36,
+#    "security":"WPA2","rxRate":816.7,"txRate":680.6,"ip":"192.168.50.48"}
+#
+# The device comes from `iw dev` rather than from the default route, which is
+# the whole point of this being separate from qs-net-info: with tailscale or a
+# FortiClient tunnel up, `ip route get` names the tunnel and the network panel
+# correctly reports the tunnel - but the radio underneath it is still the thing
+# the bar glyph is about, and it has to keep being reported.
+#
+# A host with no wireless interface at all - asterix - emits {"dev":null},
+# which is what makes the bar button hide itself there.
+#
+# Everything but `security` comes out of `iw dev <dev> link`: the kernel's own
+# view, needing neither root nor a running NetworkManager. `security` is the
+# one field iw cannot report, so it comes from nmcli when nmcli exists and is
+# null otherwise.
+#
+# Signal is reported as raw dBm and nothing else. A percentage was here at
+# first, on the wext curve nmcli and iwconfig use, and it had to go: it calls
+# -53 dBm 94%, while the bar's meter reads the same RSSI the usual way and
+# lights three segments of four. Two scales side by side, disagreeing. The bar
+# derives its one reading from the dBm.
+#
+# QS_WIFI_IW and QS_WIFI_NMCLI override the two commands so the parsing can be
+# driven from fixtures, the way QS_NET_SYSFS drives qs-net-info's.
+
+# iw lives in /usr/sbin, which is not always on the PATH quickshell inherits.
+PATH=/usr/sbin:/sbin:$PATH
+export PATH
+
+IW=${QS_WIFI_IW:-iw}
+NMCLI=${QS_WIFI_NMCLI:-nmcli}
+
+# The first wireless interface that is associated, else the first one there is.
+# `iw dev` also lists P2P-device entries, which have no "Interface" line and so
+# never reach this loop.
+dev=''
+link=''
+for d in $($IW dev 2>/dev/null | sed -n 's/^[[:space:]]*Interface[[:space:]]\{1,\}\(.*\)$/\1/p'); do
+    out=$($IW dev "$d" link 2>/dev/null)
+    case "$out" in
+        *"Connected to"*) dev=$d; link=$out; break ;;
+    esac
+    [ -n "$dev" ] || dev=$d
+done
+
+[ -n "$dev" ] || { printf '{"dev":null,"up":false}\n'; exit 0; }
+
+security=''
+if [ -n "$link" ] && command -v "$NMCLI" >/dev/null 2>&1; then
+    security=$($NMCLI -t -f IN-USE,SECURITY dev wifi 2>/dev/null | sed -n 's/^\*://p' | head -1)
+fi
+
+ip=$(ip -o -4 addr show dev "$dev" 2>/dev/null |
+    sed -n 's|.*[[:space:]]inet[[:space:]]\{1,\}\([0-9.]*\)/.*|\1|p' | head -1)
+
+printf '%s\n' "$link" | awk -v dev="$dev" -v sec="$security" -v ipaddr="$ip" '
+    function jstr(s) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); return "\"" s "\"" }
+    function jval(s) { return s == "" ? "null" : jstr(s) }
+    function jnum(s) { return s == "" ? "null" : s }
+
+    /^Connected to /      { bssid = $3 }
+    /^[ \t]*freq:/        { freq = int($2) }
+    /^[ \t]*signal:/      { sig = $2 + 0 }
+    /^[ \t]*rx bitrate:/  { rx = $3 + 0 }
+    /^[ \t]*tx bitrate:/  { tx = $3 + 0 }
+    # An SSID may contain spaces, so it is taken as the rest of the line rather
+    # than as a field.
+    /^[ \t]*SSID:/        { s = $0; sub(/^[ \t]*SSID:[ \t]*/, "", s); ssid = s }
+
+    END {
+        up = (bssid != "")
+
+        # 2484 is channel 14, the one 2.4 GHz channel that is not on the
+        # 5 MHz grid the rest of the band sits on.
+        if (freq >= 2412 && freq <= 2484) {
+            band = "2.4 GHz"; chan = (freq == 2484) ? 14 : int((freq - 2407) / 5)
+        } else if (freq >= 5955) {
+            band = "6 GHz";   chan = int((freq - 5950) / 5)
+        } else if (freq >= 5000) {
+            band = "5 GHz";   chan = int((freq - 5000) / 5)
+        }
+
+        printf "{\"dev\":%s,\"up\":%s,\"ssid\":%s,\"bssid\":%s,\"signal\":%s,\"freq\":%s,\"band\":%s,\"chan\":%s,\"security\":%s,\"rxRate\":%s,\"txRate\":%s,\"ip\":%s}\n", \
+            jval(dev), (up ? "true" : "false"), jval(ssid), jval(bssid), \
+            jnum(sig), jnum(freq), jval(band), jnum(chan), \
+            jval(sec), jnum(rx), jnum(tx), jval(ipaddr)
+    }
+'
