@@ -56,8 +56,20 @@ active_is_terminal() {
 }
 
 send() {
-    # $1 mods, $2 key. The trailing comma is the empty window target.
-    hyprctl dispatch sendshortcut "$1,$2," >/dev/null
+    # $1 mods, $2 key. The third field is the window target, and it must not be
+    # *empty*: 0.55.2 rejects `CTRL,c,` with `sendshortcut: invalid args` and
+    # dispatches nothing, which is silent because hyprctl still exits 0. A
+    # single space parses as the same "whatever holds focus" target and is
+    # accepted, so the space is load-bearing - do not tidy it away.
+    local out
+    out=$(hyprctl dispatch sendshortcut "$1,$2, " 2>&1)
+    if [ "$out" != "ok" ]; then
+        printf 'uniclip: sendshortcut %s,%s failed: %s\n' "$1" "$2" "$out" >&2
+        if command -v notify-send >/dev/null; then
+            notify-send -u critical 'uniclip' "sendshortcut $1,$2: $out"
+        fi
+        return 1
+    fi
 }
 
 case "${1:-}" in
@@ -65,7 +77,12 @@ case "${1:-}" in
         if active_is_terminal; then send CTRL insert; else send CTRL c; fi
         ;;
     paste)
-        if active_is_terminal; then send SHIFT insert; else send CTRL v; fi
+        # Not Shift+Insert, which upstream sends: in Alacritty that is
+        # PasteSelection - the *primary* selection, not the clipboard - so the
+        # chord lands but pastes the wrong buffer, or nothing. Ctrl+Shift+V is
+        # the clipboard paste in alacritty, ghostty, foot, kitty and wezterm
+        # alike.
+        if active_is_terminal; then send "CTRL SHIFT" v; else send CTRL v; fi
         ;;
     cut)
         # No terminal variant: a terminal has nothing to cut, and Ctrl+X in one
