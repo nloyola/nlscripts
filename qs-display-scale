@@ -42,6 +42,28 @@
 # Untouched outputs keep their exact current framebuffer size, so repeated
 # `set` calls cannot make a rounded factor drift.
 #
+# HYPRMONCFG. Where hyprmoncfg is installed and a profile is active, `set`
+# writes the new scale and the re-packed positions INTO that profile and calls
+# `hyprmoncfg apply`, rather than driving hyprctl itself.
+#
+# This is not a preference. hyprmoncfgd polls the compositor and re-applies the
+# profile matching the monitors present, and its MonitorStateHash includes
+# scale and position - so a bare `hyprctl keyword monitor` is seen as drift and
+# reverted within a poll interval, silently, a second or so after the click.
+# Going through the profile means the daemon's next poll finds exactly the
+# state it would have applied, and reverts nothing. `hyprmoncfg apply` also
+# takes the daemon's writer session, so there is one writer rather than two.
+#
+# The side effect is that the scale now SURVIVES A RELOAD, which it never did:
+# it is in the profile, and the profile is what the generated monitor config is
+# rendered from. It also means a scale change is a change to a tracked file -
+# the profiles live in home_config - which is the same deal a `hyprmoncfg save`
+# is on.
+#
+# The plain hyprctl path below is kept as the fallback for a host that has no
+# hyprmoncfg or no active profile, where nothing is persisted and a
+# `hyprctl reload` drops the scale as it always did.
+#
 # POINTER SPEED. Hyprland moves the cursor in logical coordinates, so the same
 # hand motion crosses a scaled output in fewer logical pixels but the same
 # physical distance on glass - at scale 2 the pointer visibly flies. `set`
@@ -51,8 +73,9 @@
 # adaptive accel profile is not linear in this value, so the correction is
 # right in direction and about right in size, not literal. Sensitivity is
 # global while scale is per-output, so it follows the output just scaled - the
-# one being looked at. Like the scale itself nothing is persisted, and a
-# `hyprctl reload` drops both back to what hyprland.conf says.
+# one being looked at. Sensitivity is not part of a monitor profile and is
+# never persisted, so a `hyprctl reload` drops it back to hyprland.conf's
+# default whichever backend applied the scale.
 #
 # RE-PACK ANCHOR. Changing an output's scale changes its logical width, so the
 # outputs beside it have to move for the row to stay flush - and every window
@@ -89,6 +112,8 @@
 # QS_DISPLAY_SCALE_DRY=1 prints the command instead of running it, so both
 # parsing and layout can be driven from fixtures. Setting either QUERY var
 # also picks that backend, whatever session the fixture is run from.
+# QS_DISPLAY_SCALE_NO_HMC=1 forces the plain hyprctl path even where hyprmoncfg
+# is installed and active, which is what a fixture run wants.
 
 usage() {
     echo "usage: qs-display-scale list | set <output> <factor>" >&2
@@ -277,16 +302,87 @@ cmd_set() {
     fi
 }
 
+# The active hyprmoncfg profile, or nothing.
+#
+# `hyprmoncfg status` prints "Active profile: <name>", or "custom layout" when
+# the live geometry matches no saved profile. Deliberately the human output and
+# not `--json`: this is one field, and parsing a line beats taking a jq
+# dependency for it. (jq IS used below, to patch the profile itself, where
+# there is no honest alternative.)
+hmc_profile() {
+    [ "$QS_DISPLAY_SCALE_NO_HMC" = 1 ] && return 1
+    command -v hyprmoncfg >/dev/null 2>&1 || return 1
+    name=$(hyprmoncfg status 2>/dev/null |
+           awk -F': ' '/^Active profile: /{ print $2; exit }')
+    [ -n "$name" ] && [ "$name" != "custom layout" ] || return 1
+    printf '%s\n' "$name"
+}
+
+# hyprmoncfg slugifies a profile name to get its filename: lowercased, every
+# run of anything but [a-z0-9] collapsed to a single dash, dashes trimmed off
+# both ends. Same rule as its internal/profile/store.go.
+hmc_profile_path() {
+    slug=$(printf '%s' "$1" |
+        awk '{ s = tolower($0); gsub(/[^a-z0-9]+/, "-", s); gsub(/^-+|-+$/, "", s); print s }')
+    printf '%s/hyprmoncfg/profiles/%s.json\n' \
+           "${XDG_CONFIG_HOME:-$HOME/.config}" "$slug"
+}
+
+# Write the planned scale and position of every output into the profile, then
+# hand it back to hyprmoncfg to apply. jq builds the whole document and the
+# result is moved into place, so a failure anywhere leaves the profile exactly
+# as it was rather than truncated.
+#
+# Outputs are matched by connector name, which is what the plan carries and
+# what the profile records alongside its make|model|serial key. An output the
+# profile does not mention is left alone: it is not part of this layout, and
+# inventing an entry for it here would be guessing at every field but three.
+hmc_apply() {
+    name=$1
+    plan=$2
+    path=$(hmc_profile_path "$name")
+    [ -f "$path" ] || {
+        echo "qs-display-scale: no profile file at $path" >&2
+        return 1
+    }
+
+    tmp=$path.qs-display-scale.$$
+    if ! jq --argjson plan "$plan" '
+            .outputs |= map(
+                . as $out
+                | (($plan[] | select(.name == $out.name)) // null) as $p
+                | if $p then . + {scale: $p.scale, x: $p.x, y: $p.y} else . end
+            )
+         ' "$path" > "$tmp"; then
+        rm -f "$tmp"
+        echo "qs-display-scale: could not patch profile $name" >&2
+        return 1
+    fi
+    mv -f "$tmp" "$path" || { rm -f "$tmp"; return 1; }
+
+    # --confirm-timeout 0 because there is nobody at a terminal. `apply`
+    # otherwise asks "Keep this configuration?" on stdin and reverts after ten
+    # seconds; run from the bar it reads EOF immediately, reverts, and exits
+    # non-zero - the scale lands and is gone again before the popup closes.
+    # The confirmation is the right default for a person typing the command and
+    # exactly wrong for a button.
+    hyprmoncfg apply --confirm-timeout 0 "$name"
+}
+
 cmd_set_hypr() {
     target=$1
     factor=$2
     [ -n "$target" ] && [ -n "$factor" ] || usage
     check_factor "$factor"
 
-    # One --batch so the outputs never land in an overlapping intermediate
-    # state, and every monitor is restated with its own current mode, refresh
-    # and scale so only position and the target's scale actually move.
-    args=$(query_hypr | parse_hypr | sort -t "$(printf '\t')" -k6,6n |
+    # One layout computation, whichever backend applies it. Every monitor is
+    # restated with its own current mode, refresh and scale so only position
+    # and the target's scale actually move. The rows are
+    #
+    #   M<TAB>name<TAB>w<TAB>h<TAB>refresh<TAB>x<TAB>y<TAB>scale
+    #
+    # with a single trailing S row carrying the pointer sensitivity.
+    plan=$(query_hypr | parse_hypr | sort -t "$(printf '\t')" -k6,6n |
         awk -v target="$target" -v factor="$factor" "$HYPR_SCALE120"'
       {
           n++
@@ -314,24 +410,57 @@ cmd_set_hypr() {
           for (i = ti - 1; i >= 1; i--) X[i] = X[i + 1] - NW[i]
           for (i = ti + 1; i <= n; i++) X[i] = X[i - 1] + NW[i - 1]
           for (i = 1; i <= n; i++)
-              printf " ; keyword monitor %s,%dx%d@%s,%dx%d,%.6f",
+              printf "M\t%s\t%d\t%d\t%s\t%d\t%d\t%.6f\n",
                      nm[i], W[i], H[i], RR[i], X[i], Y[i], K[i] / 120
-          tk = K[ti]
           # Pointer speed compensation - see POINTER SPEED above. Derived from
           # the snapped k, not the requested factor, so it cannot disagree with
           # the scale actually in force. Only a scale of 0.5 or below hits the
           # clamp, at which point the pointer is as fast as libinput allows.
-          s = 120 / tk - 1
+          s = 120 / K[ti] - 1
           if (s < -1) s = -1
           else if (s > 1) s = 1
-          printf " ; keyword input:sensitivity %.3f", s
+          printf "S\t%.3f\n", s
       }
     ') ||
         { echo "qs-display-scale: no such enabled output: $target" >&2; exit 3; }
 
-    [ -n "$args" ] || { echo "qs-display-scale: no enabled outputs" >&2; exit 3; }
+    [ -n "$plan" ] || { echo "qs-display-scale: no enabled outputs" >&2; exit 3; }
 
-    batch=${args# ; }
+    sensitivity=$(printf '%s\n' "$plan" | awk -F'\t' '$1 == "S" { print $2 }')
+
+    profile=$(hmc_profile) || profile=""
+
+    if [ -n "$profile" ]; then
+        # The same plan as a JSON array, for the profile patch.
+        json=$(printf '%s\n' "$plan" | awk -F'\t' '
+          BEGIN { printf "[" }
+          $1 == "M" { printf "%s{\"name\":\"%s\",\"scale\":%.6f,\"x\":%d,\"y\":%d}",
+                             (n++ ? "," : ""), $2, $8, $6, $7 }
+          END { printf "]\n" }
+        ')
+        if [ "$QS_DISPLAY_SCALE_DRY" = 1 ]; then
+            echo "hyprmoncfg apply $profile <- $json"
+            echo "hyprctl keyword input:sensitivity $sensitivity"
+            return
+        fi
+        if hmc_apply "$profile" "$json"; then
+            hyprctl keyword input:sensitivity "$sensitivity" >/dev/null
+            return
+        fi
+        # Fall through to the plain path rather than leave the click with
+        # nothing to show for it. The daemon may revert that, which is visible
+        # and recoverable; doing nothing at all is neither.
+        echo "qs-display-scale: falling back to hyprctl" >&2
+    fi
+
+    # One --batch so the outputs never land in an overlapping intermediate
+    # state.
+    batch=$(printf '%s\n' "$plan" | awk -F'\t' -v sens="$sensitivity" '
+      $1 == "M" { printf "%skeyword monitor %s,%dx%d@%s,%dx%d,%.6f",
+                         (n++ ? " ; " : ""), $2, $3, $4, $5, $6, $7, $8 }
+      END { printf " ; keyword input:sensitivity %s\n", sens }
+    ')
+
     if [ "$QS_DISPLAY_SCALE_DRY" = 1 ]; then
         echo "hyprctl --batch $batch"
     else
