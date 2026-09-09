@@ -14,6 +14,12 @@
 # a finished step, and the loop reports it as one. A session that neither ticked
 # nor committed did nothing at all, and that still stops the run.
 #
+# A step that has to be proven on the staging VPS is never run. Staging is
+# deployed by hand and the proof is an observation in a browser against it, so
+# the loop stops when it reaches one and says so, the same way it stops on an
+# unmet gate. Deploy staging yourself and drive that step with the
+# advance-issue-step-staging skill; rerun the loop afterwards if steps remain.
+#
 # Every issue gets its own branch. Starting an issue creates one, named from the
 # issue title unless a name is given; resuming an issue whose branch already
 # exists switches to it rather than starting over.
@@ -627,6 +633,31 @@ unmet_gates() {
   return 1
 }
 
+# The last step of an issue written to the writing-issues contract is "Prove it
+# on staging": no code changes, and the check is an observation in a browser
+# against a real deployment of the staging VPS. That deployment is the user's -
+# they run the deploy, the migration, the restart - and the observation wants
+# eyes on a page. A headless session handed such a step can only do one of two
+# wrong things: deploy the host itself, or convince itself the proof passed
+# without ever seeing it. So the loop refuses the step and hands it back, for
+# the advance-issue-step-staging skill to drive with the user present.
+#
+# Matched on the step heading alone. A step whose bullets merely mention staging
+# - a note for whoever writes the rollout, say - is ordinary work and runs like
+# any other; only a step that names staging as its business is held back.
+#
+# Prints the step heading and returns 0 when the next step is a staging proof;
+# returns 1 otherwise.
+staging_step() {
+  local step
+
+  step=$(gh issue view "$issue" --json body -q .body | grep -m1 '^- \[ \]')
+  [ -n "$step" ] || return 1
+
+  printf '%s\n' "$step" | grep -qi 'staging' || return 1
+  printf '%s' "$step" | sed -E 's/^- \[ \][[:space:]]*//; s/\*\*//g'
+}
+
 repo=$(basename "$repo_root")
 
 # Derive a branch name from the issue title. Drops a leading "Phase 1.2 - " so
@@ -743,6 +774,12 @@ for ((i = 1; i <= max; i++)); do
 
   gates=$(unmet_gates) ||
     die "Next step of #$issue is gated: $gates. $before_open step(s) still open."
+
+  # Before the usage gate, because this stop has nothing to do with how much of
+  # the window is left: the step is not this loop's to run at any budget.
+  if step_title=$(staging_step); then
+    die "Next step of #$issue is a staging proof ('$step_title'), which the loop does not run: staging is deployed by hand and the proof is an observation against it. Deploy staging on $branch, then drive the step with the advance-issue-step-staging skill. $before_open step(s) still open."
+  fi
 
   # After the gates and before the work: a run that stops here has pushed
   # everything the last session did and left the next step untouched.
