@@ -21,6 +21,12 @@
 # The order matters and is not arbitrary: a laptop with an external monitor
 # attached has both, and the internal panel is the one the brightness keys are
 # expected to move.
+#
+# THE MICROPHONE IS THE ONE THING pulsemixer CANNOT DO. A bare --id addresses the
+# default *sink* and there is no spelling for the default *source*, so mic-mute
+# goes through wpctl and @DEFAULT_AUDIO_SOURCE@ instead. Both Hyprland hosts run
+# pipewire with wireplumber, so wpctl is there; it is the call
+# omarchy-audio-input-mute makes too.
 
 state_file="${XDG_RUNTIME_DIR:-/tmp}/quickshell-osd.json"
 
@@ -51,6 +57,12 @@ volume_value() {
   pulsemixer --get-volume 2>/dev/null | awk '{print int(($1 + $2) / 2)}'
 }
 
+# wpctl prints "Volume: 0.42", with " [MUTED]" appended when the source is muted,
+# so one read answers both questions the OSD asks.
+mic_line() {
+  wpctl get-volume @DEFAULT_AUDIO_SOURCE@ 2>/dev/null
+}
+
 ddc_displays() {
   ddcutil detect 2>/dev/null | awk '/^Display [0-9]+/ {print $2}'
 }
@@ -72,12 +84,12 @@ ddc_set_all() {
 
 case "$1" in
   volume-up)
-    pulsemixer --change-volume +2
+    pulsemixer --change-volume "+${2:-2}"
     value=$(volume_value)
     write_osd volume "${value:-0}" "Volume ${value:-0}%" ""
     ;;
   volume-down)
-    pulsemixer --change-volume -2
+    pulsemixer --change-volume "-${2:-2}"
     value=$(volume_value)
     write_osd volume "${value:-0}" "Volume ${value:-0}%" ""
     ;;
@@ -90,6 +102,21 @@ case "$1" in
     else
       write_osd volume "${value:-0}" "Volume ${value:-0}%" ""
     fi
+    ;;
+  mic-mute)
+    wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle >/dev/null 2>&1
+    line=$(mic_line)
+    # The kind is "microphone" only so the payload says what it is: shell.qml
+    # sends everything that is not "brightness" to the volume button, so the
+    # readout appears under the speaker icon either way.
+    case "$line" in
+      *MUTED*) write_osd microphone 0 "Microphone muted" "󰍭" ;;
+      "")      write_osd microphone 0 "No microphone" "󰍭" ;;
+      *)
+        value=$(echo "$line" | awk '{print int($2 * 100 + 0.5)}')
+        write_osd microphone "${value:-0}" "Microphone ${value:-0}%" "󰍬"
+        ;;
+    esac
     ;;
   brightness-up)
     if brightnessctl --class=backlight --list >/dev/null 2>&1; then
@@ -122,7 +149,7 @@ case "$1" in
     fi
     ;;
   *)
-    echo "usage: qs-osd volume-up|volume-down|volume-mute|brightness-up|brightness-down" >&2
+    echo "usage: qs-osd volume-up [step]|volume-down [step]|volume-mute|mic-mute|brightness-up|brightness-down" >&2
     exit 2
     ;;
 esac
