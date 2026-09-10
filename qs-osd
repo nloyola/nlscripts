@@ -24,13 +24,27 @@
 
 state_file="${XDG_RUNTIME_DIR:-/tmp}/quickshell-osd.json"
 
+# Milliseconds since the epoch, which is what shell.qml compares its Date.now()
+# against to decide a payload is stale.
+#
+# NOT `date +%s%3N`. The field width on %N is a GNU extension that uutils does
+# not implement, and gudrun runs Ubuntu 25.10, whose coreutils IS uutils - so
+# there the format silently yielded nanoseconds, 19 digits where 13 were meant.
+# shell.qml then read a timestamp a million times too large, `Date.now() - time`
+# came out hugely negative, and the age check could never fire: the guard against
+# replaying the previous session's OSD on every config reload was dead on that
+# host. Trimming six digits off %N is right on both.
+now_ms() {
+  date +%s%N | awk '{print substr($0, 1, length($0) - 6)}'
+}
+
 write_osd() {
   kind=$1
   value=$2
   label=$3
   icon=$4
   printf '{"kind":"%s","value":%s,"label":"%s","icon":"%s","time":%s}\n' \
-    "$kind" "$value" "$label" "$icon" "$(date +%s%3N)" > "$state_file"
+    "$kind" "$value" "$label" "$icon" "$(now_ms)" > "$state_file"
 }
 
 volume_value() {
