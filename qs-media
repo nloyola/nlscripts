@@ -1,8 +1,36 @@
 #!/bin/sh
+# qs-media - one place that decides WHICH MPRIS player a media action means, for
+# the bar's transport buttons and for the XF86Audio* keys alike.
+#
+# WHY THE KEYS CAME HERE. The Hyprland binds used to call
+# `playerctl --player=spotify_player` directly, which is a hard pin: start a
+# video in Chrome and the play key still went to Spotify, silently. Omarchy has
+# no pin - its `omarchy-shell media ...` follows the active source, and
+# SHIFT+Play moves between sources when there is more than one. Both of those now
+# land here, on the picker this file already had.
+#
+# WHY source-next NEEDS STATE. playerctl is stateless: it re-picks from scratch
+# on every invocation, so "the source I just switched to" cannot survive one
+# keypress to the next. The choice is kept in $XDG_RUNTIME_DIR, which is the
+# right lifetime - a login's worth, gone on reboot, never in $HOME.
+#
+# It is a preference, not a promise. A remembered player is honoured only while
+# it is still on the bus; one that has quit falls straight through to the
+# heuristics below, so the file can never wedge the keys on a dead source.
+
+state_file="${XDG_RUNTIME_DIR:-/tmp}/quickshell-media-player"
 
 players=$(playerctl -l 2>/dev/null || true)
 
 pick_player() {
+  # The source last chosen with source-next/source-prev, if it is still running.
+  if [ -r "$state_file" ]; then
+    remembered=$(cat "$state_file")
+    for p in $players; do
+      [ "$p" = "$remembered" ] && { echo "$p"; return; }
+    done
+  fi
+
   # Prefer actively playing players.
   for p in $players; do
     [ "$(playerctl -p "$p" status 2>/dev/null)" = "Playing" ] && { echo "$p"; return; }
@@ -25,6 +53,31 @@ pick_player() {
     echo "$p"
     return
   done
+}
+
+# playerctl names carry a bus suffix - "chromium.instance1234" - which is noise
+# in a notification and changes every time the app restarts.
+pretty() {
+  echo "$1" | sed 's/\.instance[0-9]*$//'
+}
+
+# Move the remembered source one step along the list, wrapping. $1 is 1 or -1.
+cycle() {
+  step=$1
+  [ -n "$players" ] || {
+    notify-send -t 2000 -r 3 -u low "Media" "No media players" 2>/dev/null
+    return 0
+  }
+
+  count=$(echo "$players" | wc -l)
+  index=$(echo "$players" | grep -Fxn "$(pick_player)" | cut -d: -f1)
+  [ -n "$index" ] || index=1
+
+  next=$(( (index - 1 + step + count) % count + 1 ))
+  chosen=$(echo "$players" | sed -n "${next}p")
+
+  printf '%s\n' "$chosen" > "$state_file"
+  notify-send -t 2000 -r 3 -u low "Media source" "$(pretty "$chosen")" 2>/dev/null
 }
 
 player=$(pick_player)
@@ -60,8 +113,18 @@ case "$1" in
       fi
     fi
     ;;
+  source-next)
+    cycle 1
+    ;;
+  source-prev)
+    cycle -1
+    ;;
+  current)
+    # Not on any key - it is how you ask the script what the keys would act on.
+    printf '%s\n' "$player"
+    ;;
   *)
-    echo "usage: qs-media status|play-pause|next|previous" >&2
+    echo "usage: qs-media status|play-pause|next|previous|stop|source-next|source-prev|current" >&2
     exit 2
     ;;
 esac
