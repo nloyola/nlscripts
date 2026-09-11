@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# clip-history-open - open a clipboard-history entry in whatever handles it.
+#
+# Alt+Return on a row of the quickshell clipboard panel ($mod+CTRL+V).
+# Rewritten from Omarchy's omarchy-clipboard-open: upstream dispatches to its
+# own omarchy-launch-browser, omarchy-launch-editor and tensaku-edit, none of
+# which exist here, so all three become xdg-open and the choice of application
+# stays with the desktop's own defaults.
+#
+# Usage: clip-history-open --index <n>
+#
+#   image  opened from the file capture.sh already wrote
+#   text   a URL - or a bare host that reads as one - goes to the browser;
+#          anything else is written to a scratch file and opened there, since
+#          xdg-open needs something on disk to hand over.
+
+set -uo pipefail
+
+HISTORY_PATH="${XDG_STATE_HOME:-$HOME/.local/state}/clipboard/history.json"
+OPEN_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/clipboard/opened"
+
+index=""
+
+usage() {
+    printf 'usage: %s --index <n>\n' "${0##*/}" >&2
+    exit 64
+}
+
+while (( $# > 0 )); do
+    case "$1" in
+        --index) index="${2:-}"; shift 2 ;;
+        *)       usage ;;
+    esac
+done
+
+[[ $index =~ ^[0-9]+$ ]] || usage
+[ -r "$HISTORY_PATH" ] || exit 1
+
+entry_type=$(jq -er --argjson index "$index" '.[$index].type' "$HISTORY_PATH") || exit 1
+
+open_text() {
+    local text="$1" url="" file=""
+
+    url=$(grep -Eom1 'https?://[^[:space:]"'\''<>]+' <<<"$text" || true)
+    # A bare host on its own line - "example.com/docs" - is a URL to anything
+    # that reads it, so treat it as one rather than opening it in an editor.
+    if [ -z "$url" ] && [[ $text =~ ^[[:space:]]*([[:alnum:]][[:alnum:].-]+\.[[:alpha:]]{2,})(/[^[:space:]]*)?[[:space:]]*$ ]]; then
+        url="https://${BASH_REMATCH[1]}${BASH_REMATCH[2]}"
+    fi
+
+    if [ -n "$url" ]; then
+        exec xdg-open "$url"
+    fi
+
+    mkdir -p "$OPEN_DIR"
+    file=$(mktemp --tmpdir="$OPEN_DIR" clipboard.XXXXXX.txt) || exit 1
+    printf '%s' "$text" > "$file"
+    exec xdg-open "$file"
+}
+
+case "$entry_type" in
+    image)
+        path=$(jq -er --argjson index "$index" '.[$index].path' "$HISTORY_PATH") || exit 1
+        [ -r "$path" ] || exit 1
+        exec xdg-open "$path"
+        ;;
+    text)
+        text=$(jq -er --argjson index "$index" '.[$index].text' "$HISTORY_PATH") || exit 1
+        open_text "$text"
+        ;;
+    *)
+        exit 1
+        ;;
+esac

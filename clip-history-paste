@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# clip-history-paste - put a clipboard-history entry back on the clipboard, and
+# paste it.
+#
+# What the quickshell clipboard panel ($mod+CTRL+V) runs when a row is chosen.
+# Rewritten from Omarchy's omarchy-clipboard-paste-text and
+# omarchy-clipboard-paste-file, which are two scripts there; the copy is the
+# only thing that differs between them, so they are one here.
+#
+# Usage:
+#   clip-history-paste [--copy-only] --index <n>
+#   clip-history-paste [--copy-only] --file <mime> <path>
+#
+# --index reads entry <n> out of the history file rather than taking the text
+# on the command line: the panel only ever renders a capped prefix of a large
+# entry, so the text it has is not always the whole entry. The file is the one
+# place the whole thing exists.
+#
+# WHY NOT wtype. Upstream types Shift+Insert with wtype, which is installed on
+# neither host, and which in Alacritty is PasteSelection - the primary
+# selection, not the clipboard - so the chord would land and paste the wrong
+# buffer. uniclip already picks the right chord per window class and injects it
+# with `hyprctl dispatch sendshortcut`, which both Hyprland versions here have.
+
+set -uo pipefail
+
+HISTORY_PATH="${XDG_STATE_HOME:-$HOME/.local/state}/clipboard/history.json"
+
+copy_only=false
+index=""
+mime=""
+path=""
+
+usage() {
+    printf 'usage: %s [--copy-only] --index <n>\n' "${0##*/}" >&2
+    printf '       %s [--copy-only] --file <mime> <path>\n' "${0##*/}" >&2
+    exit 64
+}
+
+while (( $# > 0 )); do
+    case "$1" in
+        --copy-only) copy_only=true; shift ;;
+        --index)     index="${2:-}"; shift 2 ;;
+        --file)      mime="${2:-}"; path="${3:-}"; shift 3 ;;
+        *)           usage ;;
+    esac
+done
+
+if [ -n "$index" ]; then
+    [[ $index =~ ^[0-9]+$ ]] || usage
+    [ -r "$HISTORY_PATH" ] || exit 1
+    # -j so the text goes out exactly as stored: no JSON quoting, and no
+    # trailing newline jq would otherwise add to every copy.
+    jq -e --argjson index "$index" \
+        '.[$index].type == "text" and (.[$index].text | type == "string")' \
+        "$HISTORY_PATH" >/dev/null || exit 1
+    jq -j --argjson index "$index" '.[$index].text' "$HISTORY_PATH" | wl-copy
+elif [ -n "$mime" ] && [ -n "$path" ]; then
+    [ -r "$path" ] || exit 1
+    wl-copy --type "$mime" < "$path"
+else
+    usage
+fi
+
+[ "$copy_only" = true ] && exit 0
+
+# wl-copy owns the selection asynchronously, and the chord below is delivered
+# to whatever has focus the moment it arrives. Without the pause the paste can
+# beat the new selection and put the OLD clipboard in the window.
+sleep 0.15
+exec uniclip paste
