@@ -1,0 +1,348 @@
+#!/bin/sh
+# What has moved in the Omarchy code this desktop borrows from.
+#
+#   omarchy-update [--write] [config|themes|flakes]...
+#       Report every Omarchy upstream this repo tracks. With no check named,
+#       run all three and finish with what is deliberately not tracked.
+#       --write applies whatever is safely applicable - see below, it is not
+#       the same act in all three.
+#
+# Exit 0 nothing moved, 1 something did, 2 something could not be answered
+# (no network, a renamed branch, a missing flake.lock). Not knowing outranks
+# drift: a run that found one thing moved and could not answer for another has
+# not answered the question that was asked. That is what makes this usable
+# from anything scheduled.
+#
+# THE INVENTORY IS omarchy/upstream.conf IN home_config, not this file. What
+# is tracked, which upstream paths matter and why, and where the bookmark
+# currently sits are all facts about that repo rather than about this script,
+# and the script is in a different repo (the nlscripts submodule). Read that
+# file first; it is the documentation as much as the configuration.
+#
+# THE THREE CHECKS ARE NOT THE SAME KIND OF THING.
+#
+#   config   basecamp/omarchy itself, and the only genuinely new work here.
+#            Nothing in it can be applied mechanically: upstream's config is
+#            Lua and this repo's is hyprlang, menu.jsonc here is a
+#            reimplementation rather than a copy, and the animations,
+#            screenshot.sh and uniclip were transcribed by hand. So what is
+#            printed is upstream's own diff between the pinned commit and the
+#            branch head, restricted to the paths this repo derives from -
+#            something to read, not something to apply. --write writes exactly
+#            one thing: the pin, moved to the head that was just reported. It
+#            is how you say "seen", and it never touches a config file.
+#
+#   themes   Delegates to `qs-theme refresh`, which is already this same
+#            command for the 29 palettes that track an upstream. --write
+#            passes --write through. Nothing here has a second opinion about
+#            what a theme is.
+#
+#   flakes   The `flake = false` inputs in flake.nix, compared against their
+#            branch heads. --write runs `nix flake update` for the ones that
+#            moved, and stops there - it never runs home-manager switch, and
+#            the report says so.
+#
+# WHY A TARBALL AND NOT A CLONE. `git clone` of basecamp/omarchy fails on
+# asterix: git reaches for a /usr/bin/gh credential helper that is not
+# installed. The codeload tarball has no such problem and is what
+# docs/desktop.md already describes as the way this repo takes upstream code.
+# Fetched trees are cached by sha under OMARCHY_UPDATE_CACHE, which is safe
+# precisely because a sha names one tree for ever.
+#
+# OMARCHY_UPDATE_REPO relocates the home_config working tree,
+# OMARCHY_UPDATE_CONF the pin file inside it, OMARCHY_UPDATE_CACHE the fetched
+# trees, OMARCHY_UPDATE_QS_THEME the resolver and OMARCHY_UPDATE_NIX the nix
+# binary. OMARCHY_UPDATE_SOURCE replaces the network with a directory holding
+# trees/<sha> and refs/<owner>_<repo>_<branch>, which is what the test suite
+# drives - the same reason qs-theme's fetcher accepts a path where a URL goes.
+# A drift report testable only by reaching GitHub is one that is never tested.
+
+set -u
+
+REPO=${OMARCHY_UPDATE_REPO:-$HOME/home_config}
+CONF=${OMARCHY_UPDATE_CONF:-$REPO/omarchy/upstream.conf}
+CACHE=${OMARCHY_UPDATE_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/omarchy-update}
+QS_THEME=${OMARCHY_UPDATE_QS_THEME:-qs-theme}
+NIX=${OMARCHY_UPDATE_NIX:-nix}
+SOURCE=${OMARCHY_UPDATE_SOURCE:-}
+
+usage() {
+    echo "usage: omarchy-update [--write] [config|themes|flakes]..." >&2
+    exit 2
+}
+
+die() { echo "omarchy-update: $*" >&2; exit 2; }
+
+# 0 clean, 1 drift, 2 unanswered. Accumulated across checks and resolved once
+# at the end, so a run reports everything it found rather than stopping at the
+# first thing that moved.
+drift=0
+unknown=0
+
+short() { echo "$1" | cut -c1-7; }
+
+# ── the pin file ────────────────────────────────────────────────────
+
+# All values for one keyword, one per line, with the keyword and the
+# whitespace after it removed. Comments and blanks never match, because a
+# match is the whole first field. awk rather than sed so that a hand-edited
+# file whose last line has no newline still yields that line - the frozen row
+# is the last directive in the shipped file, and it went missing exactly once
+# that way.
+conf() {
+    awk -v k="$1" '$1 == k && NF >= 2 { sub(/^[ \t]*[^ \t]+[ \t]+/, ""); print }' "$CONF"
+}
+
+conf1() { conf "$1" | head -1; }
+
+# ── the network, or whatever stands in for it ───────────────────────
+
+# The sha a branch points at, empty when that cannot be established. Every
+# caller treats empty as "unanswered" rather than as "unchanged", which is the
+# distinction the third exit code exists for.
+resolve_head() {  # resolve_head <owner> <repo> <branch>
+    if [ -n "$SOURCE" ]; then
+        cat "$SOURCE/refs/$1_$2_$3" 2>/dev/null
+        return
+    fi
+    command -v curl >/dev/null 2>&1 || return
+    command -v jq   >/dev/null 2>&1 || return
+    curl -sfL --max-time 30 "https://api.github.com/repos/$1/$2/commits/$3" 2>/dev/null |
+        jq -r '.sha // empty' 2>/dev/null
+}
+
+# One upstream tree, unpacked at <dir>. Returns non-zero when it cannot be
+# had, leaving <dir> absent.
+fetch_tree() {  # fetch_tree <owner> <repo> <sha> <dir>
+    _o=$1 _r=$2 _sha=$3 _dir=$4
+
+    if [ -n "$SOURCE" ]; then
+        [ -d "$SOURCE/trees/$_sha" ] || return 1
+        cp -a "$SOURCE/trees/$_sha" "$_dir"
+        return 0
+    fi
+
+    # A sha names one tree for ever, so a cached unpack can never be stale.
+    if [ -d "$CACHE/trees/$_sha" ]; then
+        cp -a "$CACHE/trees/$_sha" "$_dir"
+        return 0
+    fi
+
+    command -v curl >/dev/null 2>&1 || return 1
+    _tmp=${TMPDIR:-/tmp}/omarchy-update.$$.$_sha
+    rm -rf "$_tmp"; mkdir -p "$_tmp" || return 1
+    if ! curl -sfL --max-time 120 \
+              "https://codeload.github.com/$_o/$_r/tar.gz/$_sha" 2>/dev/null |
+         tar xzf - -C "$_tmp" 2>/dev/null
+    then
+        rm -rf "$_tmp"; return 1
+    fi
+    # codeload wraps everything in one <repo>-<sha> directory.
+    _root=$(find "$_tmp" -mindepth 1 -maxdepth 1 -type d | head -1)
+    [ -n "$_root" ] || { rm -rf "$_tmp"; return 1; }
+
+    mkdir -p "$CACHE/trees"
+    rm -rf "$CACHE/trees/$_sha"
+    mv "$_root" "$CACHE/trees/$_sha" 2>/dev/null || cp -a "$_root" "$CACHE/trees/$_sha"
+    rm -rf "$_tmp"
+    cp -a "$CACHE/trees/$_sha" "$_dir"
+}
+
+# ── 1. the config drift check ───────────────────────────────────────
+
+check_config() {
+    slug=$(conf1 repo)
+    branch=$(conf1 branch)
+    pin=$(conf1 commit)
+    owner=${slug%%/*}
+    name=${slug#*/}
+
+    [ -n "$slug" ] && [ -n "$branch" ] && [ -n "$pin" ] ||
+        die "$CONF names no repo, branch or commit"
+
+    head=$(resolve_head "$owner" "$name" "$branch")
+    if [ -z "$head" ]; then
+        echo "omarchy: could not resolve $slug $branch - left at $(short "$pin")"
+        unknown=1
+        return
+    fi
+
+    if [ "$head" = "$pin" ]; then
+        echo "omarchy: up to date at $(short "$pin") ($branch)"
+        return
+    fi
+
+    echo "omarchy: $branch moved $(short "$pin") -> $(short "$head")"
+
+    work=$(mktemp -d) || die "no scratch directory"
+    # Both trees are unpacked under one parent and diffed by relative path, so
+    # every path in the output reads pinned/... or head/... A diff run on the
+    # absolute paths would print the scratch directory into the report and
+    # change its text on every run.
+    if ! fetch_tree "$owner" "$name" "$pin" "$work/pinned" ||
+       ! fetch_tree "$owner" "$name" "$head" "$work/head"
+    then
+        echo "  could not fetch both trees - nothing compared"
+        rm -rf "$work"
+        unknown=1
+        return
+    fi
+
+    total=0
+    moved=0
+    for p in $(conf path); do
+        total=$((total + 1))
+        if [ ! -e "$work/pinned/$p" ] && [ ! -e "$work/head/$p" ]; then
+            echo "  $p"
+            echo "  (absent from $slug at both commits - the pin file names a path upstream does not have)"
+            moved=$((moved + 1))
+            continue
+        fi
+        out=$(cd "$work" && diff -ruN "pinned/$p" "head/$p" 2>&1)
+        [ -n "$out" ] || continue
+        moved=$((moved + 1))
+        echo "  $p"
+        printf '%s\n' "$out"
+    done
+    rm -rf "$work"
+
+    if [ "$moved" -eq 0 ]; then
+        echo "  no watched path changed"
+    else
+        echo "  $moved of $total watched paths moved"
+        [ "$WRITE" = 1 ] || drift=1
+    fi
+
+    # --write moves the bookmark whether or not a watched path moved: the
+    # report has been produced either way, and leaving the pin behind would
+    # replay the same diff on every run for ever.
+    if [ "$WRITE" = 1 ]; then
+        bump_pin "$head"
+        echo "  pin moved to $(short "$head")"
+    fi
+}
+
+# Rewrite the one line this script is allowed to write. Everything else in the
+# file - the prose, the path list, the ordering - comes through untouched.
+bump_pin() {
+    tmp=$CONF.$$
+    awk -v sha="$1" '
+        !done && $1 == "commit" { print "commit  " sha; done = 1; next }
+        { print }
+    ' "$CONF" > "$tmp" && mv "$tmp" "$CONF"
+}
+
+# ── 2. themes ───────────────────────────────────────────────────────
+
+check_themes() {
+    if [ "$WRITE" = 1 ]; then
+        "$QS_THEME" refresh --write
+    else
+        "$QS_THEME" refresh
+    fi
+    case $? in
+        0) ;;
+        1) drift=1 ;;
+        *) unknown=1 ;;   # qs-theme's 3: a fetch failed, or an upstream stopped resolving
+    esac
+}
+
+# ── 3. flake inputs ─────────────────────────────────────────────────
+
+check_flakes() {
+    lock=$REPO/flake.lock
+    if [ ! -r "$lock" ] || ! command -v jq >/dev/null 2>&1; then
+        echo "flakes: could not read $lock"
+        unknown=1
+        return
+    fi
+
+    stale=
+    for input in $(conf flake); do
+        spec=$(jq -r --arg i "$input" '
+            .nodes[$i] // empty
+            | [ .locked.owner, .locked.repo, .locked.rev, (.original.ref // "HEAD") ]
+            | @tsv' "$lock" 2>/dev/null)
+        if [ -z "$spec" ]; then
+            echo "$input: could not read it out of flake.lock"
+            unknown=1
+            continue
+        fi
+        # shellcheck disable=SC2086
+        set -- $spec
+        f_owner=$1 f_repo=$2 f_rev=$3 f_ref=$4
+
+        f_head=$(resolve_head "$f_owner" "$f_repo" "$f_ref")
+        if [ -z "$f_head" ]; then
+            echo "$input: could not resolve $f_owner/$f_repo $f_ref - left at $(short "$f_rev")"
+            unknown=1
+        elif [ "$f_head" = "$f_rev" ]; then
+            echo "$input: up to date at $(short "$f_rev")"
+        else
+            echo "$input: $(short "$f_rev") -> $(short "$f_head")"
+            stale="$stale $input"
+            [ "$WRITE" = 1 ] || drift=1
+        fi
+    done
+
+    # Nothing to bump means nothing to run: `nix flake update` on inputs that
+    # have not moved would still rewrite the lock's lastModified stamps and
+    # dirty the repo for no reason.
+    [ -n "$stale" ] || return
+    [ "$WRITE" = 1 ] || return
+
+    # shellcheck disable=SC2086
+    ( cd "$REPO" && "$NIX" flake update $stale )
+    echo "flakes: lock updated:$stale"
+    echo "flakes: nothing is built or activated by this - run home-manager switch yourself"
+}
+
+# ── what is deliberately not tracked ────────────────────────────────
+
+note_frozen() {
+    conf frozen | while IFS= read -r line; do
+        echo "frozen: $line"
+    done
+}
+
+# ── arguments ───────────────────────────────────────────────────────
+
+WRITE=0
+checks=
+
+for arg in "$@"; do
+    case $arg in
+        --write)                 WRITE=1 ;;
+        -h|--help)               usage ;;
+        config|themes|flakes)    checks="$checks $arg" ;;
+        *)                       usage ;;
+    esac
+done
+
+[ -r "$CONF" ] || die "no pin file at $CONF (set OMARCHY_UPDATE_CONF)"
+
+all=0
+if [ -z "$checks" ]; then
+    checks="config themes flakes"
+    all=1
+fi
+
+first=1
+for c in $checks; do
+    [ "$first" = 1 ] || echo
+    first=0
+    case $c in
+        config) check_config ;;
+        themes) check_themes ;;
+        flakes) check_flakes ;;
+    esac
+done
+
+if [ "$all" = 1 ]; then
+    echo
+    note_frozen
+fi
+
+[ "$unknown" = 0 ] || exit 2
+[ "$drift"   = 0 ] || exit 1
+exit 0
