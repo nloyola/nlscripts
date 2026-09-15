@@ -24,18 +24,17 @@
 # issue title unless a name is given; resuming an issue whose branch already
 # exists switches to it rather than starting over.
 #
-# Starting an issue requires a clean tree, the default branch checked out, and
-# every blocking issue closed. Refusing to stack a new issue on unmerged work is
-# the point: dependencies are satisfied by merging them, not by branching off
-# them, so the base a step is written against is the base it will be merged to.
-# Resuming an existing issue branch skips these checks.
+# Every run requires a clean tree. Starting an issue also requires the default
+# branch checked out and every blocking issue closed. Refusing to stack a new
+# issue on unmerged work is the point: dependencies are satisfied by merging
+# them, not by branching off them, so the base a step is written against is the
+# base it will be merged to. Resuming an existing issue branch skips the base and
+# blocker checks.
 #
 # `--here` works the issue on the branch already checked out, whatever it is
 # named, and skips those start-of-issue checks the same way resuming does. Use it
 # when the work belongs on a branch that is already going - a scratch branch, or
-# an issue whose steps continue work not yet merged. It is the one way to run an
-# issue from a dirty tree, so the uncommitted changes are yours to account for:
-# the first step that commits will sweep up anything it happens to touch.
+# an issue whose steps continue work not yet merged.
 #
 # Each session streams a line per tool call as it works, so the terminal shows
 # what the step is doing while it does it rather than only once it ends. Needs
@@ -156,9 +155,9 @@ usage: advance-issue-loop.sh [--here] <issue-number> [max-sessions] [branch] [ef
 
 Options:
   --here         Work the issue on the currently checked-out branch instead of
-                 cutting a new one, and skip the start-of-issue checks: a clean
-                 tree, the default branch as the base, and closed blockers.
-                 Refuses on a detached HEAD or on the default branch itself,
+                 cutting a new one, and skip the default-branch and blocker
+                 checks. The working tree must still be clean. Refuses on a
+                 detached HEAD or on the default branch itself,
                  and cannot be combined with an explicit branch argument.
 
 Arguments:
@@ -225,12 +224,27 @@ if [ "${#args[@]}" -eq 0 ]; then
   usage >&2
   exit 1
 fi
+if [ "${#args[@]}" -gt 4 ]; then
+  echo "!! too many positional arguments; expected at most 4" >&2
+  echo "   see: advance-issue-loop.sh --help" >&2
+  exit 1
+fi
 
 issue="${args[0]}"
 max="${args[1]:-20}"
 branch_arg="${args[2]:-}"
 effort="${args[3]:-medium}"
 
+if ! [[ "$issue" =~ ^[1-9][0-9]*$ ]]; then
+  echo "!! invalid issue number '$issue'; expected a positive integer" >&2
+  echo "   see: advance-issue-loop.sh --help" >&2
+  exit 1
+fi
+if ! [[ "$max" =~ ^[1-9][0-9]*$ ]]; then
+  echo "!! invalid max-sessions '$max'; expected a positive integer" >&2
+  echo "   see: advance-issue-loop.sh --help" >&2
+  exit 1
+fi
 # --here names the branch by pointing at it; a second name would contradict it.
 if [ "$here" = true ] && [ -n "$branch_arg" ]; then
   echo "!! --here and an explicit branch argument ('$branch_arg') conflict; pass one or the other" >&2
@@ -249,7 +263,26 @@ case "$effort" in
     ;;
 esac
 
-repo_root=$(git rev-parse --show-toplevel)
+command -v git >/dev/null 2>&1 || {
+  echo "!! required command not found: git" >&2
+  exit 1
+}
+if [ -n "$branch_arg" ] && ! git check-ref-format --branch "$branch_arg" >/dev/null 2>&1; then
+  echo "!! invalid branch name '$branch_arg'" >&2
+  echo "   see: advance-issue-loop.sh --help" >&2
+  exit 1
+fi
+repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || {
+  echo "!! not inside a Git repository" >&2
+  exit 1
+}
+repo=${repo_root##*/}
+for required in gh claude curl; do
+  command -v "$required" >/dev/null 2>&1 || {
+    echo "!! required command not found: $required" >&2
+    exit 1
+  }
+done
 env_file="$repo_root/.env"
 
 # Read one KEY=value from .env. Parsed rather than sourced: .env is a config
@@ -400,13 +433,14 @@ if ! command -v jq >/dev/null 2>&1; then
   echo "!! jq not found; running without live progress or usage checks" >&2
 fi
 
-# The same stream carries the rate-limit reports the usage gate reads, so it is
-# kept for the length of a session rather than only rendered. One file, rewritten
-# per session: only the session that just ran is ever asked about.
+# Session output is short-lived and private to this run.
+run_tmp=$(mktemp -d "${TMPDIR:-/tmp}/advance-issue-loop.XXXXXX") ||
+  die "Could not create a temporary directory."
+trap 'rm -rf -- "$run_tmp"' EXIT
+
 stream_file=""
 if [ -n "$stream" ]; then
-  stream_file=$(mktemp "${TMPDIR:-/tmp}/advance-issue-loop.XXXXXX")
-  trap 'rm -f "$stream_file"' EXIT
+  stream_file="$run_tmp/stream"
 fi
 
 # Claude Code ships a herdr integration: a SessionStart hook that tells herdr the
@@ -545,8 +579,88 @@ usage_gate() {
   esac
 }
 
-unchecked() {
-  gh issue view "$issue" --json body -q .body | grep -c '^- \[ \]' || true
+issue_body() {
+  gh issue view "$issue" --json body -q .body
+}
+
+worktree_status() {
+  git -C "$repo_root" status --porcelain=v1 --untracked-files=all --ignore-submodules=none
+}
+
+# Completion is announced to the user, to ntfy and to herdr, and must not be
+# announced over commits that exist only on this machine. The loop pushes after
+# every session, so anything ahead of the remote got there by a stop between a
+# commit and its push - and the honest repair is the push itself, which is what
+# the loop would have done had it not stopped.
+ensure_pushed() {
+  local ahead
+  if git rev-parse --verify --quiet "refs/remotes/origin/$branch" >/dev/null; then
+    ahead=$(git rev-list --count "refs/remotes/origin/$branch..HEAD") ||
+      die "Could not compare $branch against origin."
+    [ "$ahead" -eq 0 ] && return 0
+  fi
+  git push origin "$branch" || die "Push of $branch failed."
+}
+
+# One pattern for a checkbox, shared by every helper below, and deliberately the
+# same one the tick helper matches with (advance-issue-step's forge.sh). The
+# writing-issues contract has no indented sub-checkbox, but the loop is the thing
+# enforcing that contract and it cannot enforce it while disagreeing with the
+# ticker about which box is next: forge.sh would tick the indented one, the
+# loop's counts would not move, and the run would die saying nothing was ticked.
+unchecked_re='^[[:space:]]*- \[ \]'
+checkbox_re='^[[:space:]]*- \[[ xX]\]'
+
+count_unchecked() {
+  printf '%s\n' "$1" | grep -cE "$unchecked_re" || true
+}
+
+first_unchecked() {
+  printf '%s\n' "$1" | grep -m1 -E "$unchecked_re"
+}
+
+checklist_lines() {
+  printf '%s\n' "$1" | grep -E "$checkbox_re" | sed -E 's/^([[:space:]]*- \[)X\]/\1x]/' || true
+}
+
+# What a checkbox line reads as once the session has ticked it, indentation and
+# all.
+ticked() {
+  printf '%s' "${1/- \[ \]/- [x]}"
+}
+
+expected_checklist() {
+  local changed=false line
+  while IFS= read -r line; do
+    if [ "$changed" = false ] && [[ "$line" =~ $unchecked_re ]]; then
+      line=$(ticked "$line")
+      changed=true
+    fi
+    printf '%s\n' "$line"
+  done < <(checklist_lines "$1")
+}
+
+# Every checkbox that existed before the session must still be there after it,
+# in the same order and the same state, with the next one ticked. Lines the
+# session added are allowed only while they are unchecked: a step that uncovers
+# work and writes it down as a follow-up box is an ordinary outcome, and an
+# exact match of the whole checklist called that tampering.
+checklist_preserved() {
+  local before=$1 after=$2 line j=0
+  local -a want=()
+  while IFS= read -r line; do want+=("$line"); done < <(expected_checklist "$before")
+
+  while IFS= read -r line; do
+    if [ "$j" -lt "${#want[@]}" ] && [ "$line" = "${want[j]}" ]; then
+      j=$((j + 1))
+      continue
+    fi
+    # Not the line expected next, so it can only be an addition - and an
+    # addition that is already ticked is a step nobody watched being done.
+    [[ "$line" =~ $unchecked_re ]] || return 1
+  done < <(checklist_lines "$after")
+
+  [ "$j" -eq "${#want[@]}" ]
 }
 
 # Gates are written into the heading of the step they gate, per the
@@ -575,10 +689,9 @@ unchecked() {
 # Prints the unmet gates and returns 1; returns 0 when the next step is clear or
 # carries no gate at all.
 unmet_gates() {
-  local body step gates unmet=""
+  local body=$1 step gates unmet=""
 
-  body=$(gh issue view "$issue" --json body -q .body)
-  step=$(printf '%s\n' "$body" | grep -m1 '^- \[ \]')
+  step=$(first_unchecked "$body")
   [ -n "$step" ] || return 0
 
   gates=$(printf '%s\n' "$step" | grep -oiE '\(gated on [^)]*\)')
@@ -619,10 +732,10 @@ unmet_gates() {
       n=${tok##* }
       if [ -n "$ctx" ]; then
         gh issue view "$ctx" --json body -q .body 2>/dev/null |
-          grep -qiE "^- \[[xX]\] \*\*Step ${n}[^0-9]" ||
+          grep -qiE "^[[:space:]]*- \[[xX]\] \*\*Step ${n}[^0-9]" ||
           unmet="${unmet:+$unmet; }#$ctx step $n is not ticked"
       else
-        printf '%s\n' "$body" | grep -qiE "^- \[[xX]\] \*\*Step ${n}[^0-9]" ||
+        printf '%s\n' "$body" | grep -qiE "^[[:space:]]*- \[[xX]\] \*\*Step ${n}[^0-9]" ||
           unmet="${unmet:+$unmet; }Step $n is not ticked"
       fi
     done
@@ -649,22 +762,21 @@ unmet_gates() {
 # Prints the step heading and returns 0 when the next step is a staging proof;
 # returns 1 otherwise.
 staging_step() {
-  local step
+  local body=$1 step
 
-  step=$(gh issue view "$issue" --json body -q .body | grep -m1 '^- \[ \]')
+  step=$(first_unchecked "$body")
   [ -n "$step" ] || return 1
 
   printf '%s\n' "$step" | grep -qi 'staging' || return 1
-  printf '%s' "$step" | sed -E 's/^- \[ \][[:space:]]*//; s/\*\*//g'
+  printf '%s' "$step" | sed -E 's/^[[:space:]]*- \[ \][[:space:]]*//; s/\*\*//g'
 }
-
-repo=$(basename "$repo_root")
 
 # Derive a branch name from the issue title. Drops a leading "Phase 1.2 - " so
 # the name describes the work rather than its place in a plan.
 derive_branch() {
-  local slug
-  slug=$(gh issue view "$issue" --json title -q .title |
+  local title slug
+  title=$(gh issue view "$issue" --json title -q .title) || return 1
+  slug=$(printf '%s\n' "$title" |
     sed -E 's/^[[:space:]]*[Pp]hase[[:space:]]+[0-9]+(\.[0-9]+)*[[:space:]]*[-:][[:space:]]*//' |
     tr '[:upper:]' '[:lower:]' |
     sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//' |
@@ -697,15 +809,11 @@ if [ "$here" = true ]; then
     die "Refusing to work issue #$issue directly on '$base'. --here is for a feature branch: check one out, or drop --here to have one cut for you."
 
   branch_arg="$base"
-
-  # The dirty-tree check is skipped, not passed. Say so, because the first step
-  # that commits will sweep up whatever it happens to touch.
-  dirty=$(git status --porcelain)
-  if [ -n "$dirty" ]; then
-    echo "==> note: working tree is dirty and --here does not stop for it:"
-    printf '%s\n' "$dirty" | sed 's/^/      /'
-  fi
 fi
+
+initial_status=$(worktree_status) || die "Could not inspect the working tree."
+[ -z "$initial_status" ] ||
+  die "Working tree is dirty; clean it before running issue #$issue."
 
 # An issue is identified by its number, not by the exact branch name: a branch
 # named by hand belongs to the issue just as much as a derived one does, and
@@ -714,9 +822,23 @@ existing=""
 if [ -n "$branch_arg" ]; then
   git show-ref --verify --quiet "refs/heads/$branch_arg" && existing="$branch_arg"
 else
-  existing=$(git for-each-ref --format='%(refname:short)' "refs/heads/feat/issue-$issue-*" | head -1)
+  mapfile -t issue_branches < <(
+    git for-each-ref --format='%(refname:short)' "refs/heads/feat/issue-$issue-*"
+  )
+  if [ "${#issue_branches[@]}" -gt 1 ]; then
+    branch_list=$(printf '%s, ' "${issue_branches[@]}")
+    branch_list=${branch_list%, }
+    die "Multiple local branches match issue #$issue: $branch_list. Pass the branch explicitly."
+  fi
+  existing="${issue_branches[0]:-}"
 fi
-branch="${branch_arg:-${existing:-$(derive_branch)}}"
+if [ -n "$branch_arg" ]; then
+  branch="$branch_arg"
+elif [ -n "$existing" ]; then
+  branch="$existing"
+else
+  branch=$(derive_branch) || die "Could not read the title of issue #$issue from GitHub."
+fi
 
 if [ "$branch" = "$base" ]; then
   if [ "$here" = true ]; then
@@ -731,12 +853,6 @@ else
   # Starting a new issue. Everything below refuses rather than improvises: a
   # wrong base is not visible in the commits it produces, so it has to be caught
   # here or not at all.
-
-  # Uncommitted work would be carried onto a branch it does not belong to and
-  # attributed to this issue by the first step that commits.
-  [ -z "$(git status --porcelain)" ] ||
-    die "Working tree is dirty; commit or stash before starting issue #$issue, or pass --here to work it on '$base' as it stands. Note that 'git stash' leaves untracked files behind - 'git stash -u' includes them."
-
   default_branch=$(resolve_default_branch)
 
   # A new issue starts from the default branch. Anything else means unmerged
@@ -747,7 +863,8 @@ else
   # Blocking issues must be closed. Closed is not the same as merged, but the
   # base check above covers the merge; this covers the ones not yet finished.
   open_blockers=$(gh issue view "$issue" --json blockedBy \
-    -q '[.blockedBy.nodes[]? | select(.state == "OPEN") | "#\(.number)"] | join(", ")' 2>/dev/null)
+    -q '[.blockedBy.nodes[]? | select(.state == "OPEN") | "#\(.number)"] | join(", ")' 2>/dev/null) ||
+    die "Could not read blockers for issue #$issue from GitHub."
   [ -z "$open_blockers" ] ||
     die "Issue #$issue is blocked by $open_blockers. Finish and merge those first."
 
@@ -758,12 +875,15 @@ fi
 # Counted once, over ticked and unticked alike, so progress is reported against
 # the whole issue. A resumed run says 6/9 rather than restarting the count at
 # whatever was left when it began.
-total=$(gh issue view "$issue" --json body -q .body | grep -c '^- \[')
+initial_body=$(issue_body) || die "Could not read issue #$issue from GitHub."
+total=$(printf '%s\n' "$initial_body" | grep -cE "$checkbox_re" || true)
 
 for ((i = 1; i <= max; i++)); do
-  before_open=$(unchecked)
+  before_body=$(issue_body) || die "Could not read issue #$issue from GitHub."
+  before_open=$(count_unchecked "$before_body")
   if [ "$before_open" -eq 0 ]; then
     echo "==> no unchecked steps left after $((i - 1)) session(s)"
+    ensure_pushed
     # herdr turns a reported idle that follows working into `done`, which is the
     # state it means by finished-but-not-yet-looked-at. Exactly right here.
     herdr_state idle "every step done on $branch"
@@ -772,12 +892,12 @@ for ((i = 1; i <= max; i++)); do
     exit 0
   fi
 
-  gates=$(unmet_gates) ||
+  gates=$(unmet_gates "$before_body") ||
     die "Next step of #$issue is gated: $gates. $before_open step(s) still open."
 
   # Before the usage gate, because this stop has nothing to do with how much of
   # the window is left: the step is not this loop's to run at any budget.
-  if step_title=$(staging_step); then
+  if step_title=$(staging_step "$before_body"); then
     die "Next step of #$issue is a staging proof ('$step_title'), which the loop does not run: staging is deployed by hand and the proof is an observation against it. Deploy staging on $branch, then drive the step with the advance-issue-step-staging skill. $before_open step(s) still open."
   fi
 
@@ -785,7 +905,10 @@ for ((i = 1; i <= max; i++)); do
   # everything the last session did and left the next step untouched.
   usage_gate "$i" "$before_open"
 
-  before_head=$(git rev-parse HEAD)
+  session_status=$(worktree_status) || die "Could not inspect the working tree before session $i."
+  [ -z "$session_status" ] || die "Working tree became dirty before session $i."
+  before_head=$(git rev-parse HEAD) || die "Could not inspect HEAD before session $i."
+  before_step=$(first_unchecked "$before_body")
   echo "==> session $i starting at $effort effort: $before_open step(s) remaining"
   herdr_state working "session $i, $((total - before_open))/$total done"
 
@@ -794,22 +917,51 @@ for ((i = 1; i <= max; i++)); do
 
   read_usage
 
+  current_branch=$(git branch --show-current)
+  [ "$current_branch" = "$branch" ] ||
+    die "Session $i switched from $branch to ${current_branch:-a detached HEAD}."
+
+  after_head=$(git rev-parse HEAD) || die "Could not inspect HEAD after session $i."
+  git merge-base --is-ancestor "$before_head" "$after_head" ||
+    die "Session $i rewrote or discarded existing history."
   committed=false
-  [ "$(git rev-parse HEAD)" = "$before_head" ] || committed=true
+  [ "$after_head" = "$before_head" ] || committed=true
 
-  after_open=$(unchecked)
-  ticked=false
-  [ "$after_open" -ge "$before_open" ] || ticked=true
+  # Pushed the moment the commit is known to be sound, and before any check that
+  # can still stop the run. Everything below this line is about the issue body
+  # rather than the commit, and a commit held behind one of those checks is a
+  # commit stranded on this machine: the checkbox is already ticked on the forge,
+  # so the next run finds nothing left to do and reports the issue complete
+  # having never pushed it. That includes the dirty-tree check immediately below,
+  # which a step is entitled to trip - a spec left uncommitted on purpose, a
+  # generated file the repo does not ignore - and which says nothing about
+  # whether the commit belongs on the branch.
+  if [ "$committed" = true ]; then
+    git push origin "$branch" ||
+      die "Push of $branch failed after session $i."
+  fi
 
-  # The tick is what says the step is finished, so it is what the loop insists
-  # on. A commit without it is work nobody can account for; nothing at all is a
-  # session that failed silently. Either way the run stops here.
-  if [ "$ticked" = false ]; then
-    if [ "$committed" = true ]; then
-      die "Session $i committed but ticked no checkbox. $before_open step(s) still open."
+  session_status=$(worktree_status) || die "Could not inspect the working tree after session $i."
+  [ -z "$session_status" ] || die "Session $i left new uncommitted changes."
+
+  after_body=$(issue_body) || die "Could not read issue #$issue from GitHub."
+  after_open=$(count_unchecked "$after_body")
+
+  # The next checkbox, and only that checkbox, is the authority on completion.
+  # Asked of the box itself rather than of the open count: a session that ticks
+  # its own box and writes down a follow-up leaves that count where it was, and
+  # counting was how the run came to say "committed but ticked no checkbox"
+  # about a session that had ticked exactly the right one.
+  if ! checklist_lines "$after_body" | grep -Fqx -- "$(ticked "$before_step")"; then
+    if [ "$after_open" -lt "$before_open" ]; then
+      die "Session $i did not complete the next checkbox."
+    elif [ "$committed" = true ]; then
+      die "Session $i committed but did not tick the next checkbox. $before_open step(s) still open."
     fi
     die "Session $i produced neither a commit nor a ticked checkbox. $before_open step(s) still open."
   fi
+  checklist_preserved "$before_body" "$after_body" ||
+    die "Session $i changed checkboxes other than the next one."
 
   # A ticked step with no commit is a verification: the step asked whether
   # something already held and found that it did. Said out loud rather than
@@ -820,8 +972,14 @@ for ((i = 1; i <= max; i++)); do
     echo "==> session $i changed nothing: verification step, ticked with no commit"
   fi
 
-  git push origin "$branch" ||
-    die "Push of $branch failed after session $i."
+  # A step that uncovered work and wrote it down is legitimate, but it moves the
+  # finish line, so it is said out loud and the denominator follows the issue
+  # rather than the count the run started with.
+  added=$((after_open - (before_open - 1)))
+  if [ "$added" -gt 0 ]; then
+    echo "==> session $i added $added follow-up step(s)"
+  fi
+  total=$((total + added))
 
   echo "==> session $i done: $after_open step(s) remaining"
   if [ "$committed" = true ]; then
@@ -833,4 +991,15 @@ for ((i = 1; i <= max; i++)); do
   fi
 done
 
-die "Hit the $max session cap with $(unchecked) step(s) still open."
+final_body=$(issue_body) || die "Could not read issue #$issue from GitHub."
+remaining=$(count_unchecked "$final_body")
+if [ "$remaining" -eq 0 ]; then
+  echo "==> no unchecked steps left after $max session(s)"
+  ensure_pushed
+  herdr_state idle "every step done on $branch"
+  notify "$repo #$issue complete" high white_check_mark \
+    "Every step done on $branch. Ready to review and integrate."
+  exit 0
+fi
+
+die "Hit the $max session cap with $remaining step(s) still open."
