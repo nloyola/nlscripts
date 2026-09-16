@@ -2,10 +2,17 @@
 # Run one fresh `claude -p` session per unchecked step of a GitHub issue, driving
 # the advance-issue-step skill, until no unchecked steps remain.
 #
-#   advance-issue-loop.sh [--here] <issue-number> [max-sessions] [branch] [effort]
+#   advance-issue-loop.sh [--here] [--max n] [--effort level] \
+#       <issue-number> [max-sessions] [branch] [effort]
 #
 # Every session runs at the same reasoning effort, defaulting to medium. Pass
 # one of low, medium, high, xhigh, or max to raise or lower it for a whole run.
+# The session cap and the effort each have a flag as well as a positional slot,
+# so raising one of them does not mean filling in the slots before it.
+#
+# One loop at a time per repository. A second run refuses to start rather than
+# interleaving branch switches and pushes with the first, whose commits it could
+# not tell apart from a confused session's own.
 #
 # Stops early if a session fails to tick its checkbox, so a confused session
 # cannot cascade into the following steps. The tick is the authority on progress,
@@ -118,7 +125,8 @@
 #
 # Between steps the loop looks at how full the usage windows are, reading the
 # rate-limit report Claude Code puts on the session stream. Over 80% of either
-# the 5-hour session limit or the weekly one, it stops before starting the next
+# the 5-hour session limit or the weekly one - or whatever percentage
+# ADVANCE_ISSUE_USAGE_THRESHOLD names - it stops before starting the next
 # session and asks at the terminal whether to go on anyway. A session cut off
 # mid-step by a limit ticks nothing and leaves a half-finished tree behind, so
 # the loop would rather hand the decision back one step early. With no terminal
@@ -150,7 +158,8 @@ usage() {
 Run one fresh `claude -p` session per unchecked step of a GitHub issue, driving
 the advance-issue-step skill, until no unchecked steps remain.
 
-usage: advance-issue-loop.sh [--here] <issue-number> [max-sessions] [branch] [effort]
+usage: advance-issue-loop.sh [--here] [--max n] [--effort level]
+                            <issue-number> [max-sessions] [branch] [effort]
        advance-issue-loop.sh -h | --help
 
 Options:
@@ -159,6 +168,10 @@ Options:
                  checks. The working tree must still be clean. Refuses on a
                  detached HEAD or on the default branch itself,
                  and cannot be combined with an explicit branch argument.
+  --max n        Same as the max-sessions argument, without having to fill the
+                 slots before it.
+  --effort level Same as the effort argument, without having to fill the slots
+                 before it. Either form may be used, but not both at once.
 
 Arguments:
   issue-number   GitHub issue to work through, in the current repository.
@@ -177,11 +190,15 @@ Environment:
                  from any of the three the loop refuses to start.
   NTFY_URL       ntfy server, from the environment or .env (default
                  https://ntfy.sh).
+  ADVANCE_ISSUE_USAGE_THRESHOLD
+                 Percent of a usage window at which the loop stops between
+                 sessions and asks before starting the next one (default 80).
 
 Examples:
   advance-issue-loop.sh 54
   advance-issue-loop.sh --here 54
-  advance-issue-loop.sh 54 5
+  advance-issue-loop.sh 54 --max 5
+  advance-issue-loop.sh 54 --effort high
   advance-issue-loop.sh 54 20 "" high
   advance-issue-loop.sh 54 20 feat/issue-54-cutover max
 EOF
@@ -190,7 +207,18 @@ EOF
 # Options are pulled out wherever they appear, so `--here 54` and `54 --here`
 # both work and the positional slots keep their meaning either way.
 here=false
+max_opt=""
+effort_opt=""
 args=()
+
+# Both `--flag value` and `--flag=value` are accepted below; this is what the
+# first form says when the value it needs is not there.
+need_value() {
+  echo "!! $1 needs a value" >&2
+  echo "   see: advance-issue-loop.sh --help" >&2
+  exit 1
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
     -h | --help)
@@ -199,6 +227,22 @@ while [ $# -gt 0 ]; do
       ;;
     --here | --current-branch)
       here=true
+      ;;
+    --max)
+      shift
+      [ $# -gt 0 ] || need_value --max
+      max_opt="$1"
+      ;;
+    --max=*)
+      max_opt="${1#*=}"
+      ;;
+    --effort)
+      shift
+      [ $# -gt 0 ] || need_value --effort
+      effort_opt="$1"
+      ;;
+    --effort=*)
+      effort_opt="${1#*=}"
       ;;
     --)
       shift
@@ -231,9 +275,22 @@ if [ "${#args[@]}" -gt 4 ]; then
 fi
 
 issue="${args[0]}"
-max="${args[1]:-20}"
 branch_arg="${args[2]:-}"
-effort="${args[3]:-medium}"
+
+# The flag and the positional say the same thing, so being given both is a
+# contradiction rather than a precedence question to resolve quietly.
+if [ -n "$max_opt" ] && [ -n "${args[1]:-}" ]; then
+  echo "!! --max and the max-sessions argument ('${args[1]}') conflict; pass one or the other" >&2
+  echo "   see: advance-issue-loop.sh --help" >&2
+  exit 1
+fi
+if [ -n "$effort_opt" ] && [ -n "${args[3]:-}" ]; then
+  echo "!! --effort and the effort argument ('${args[3]}') conflict; pass one or the other" >&2
+  echo "   see: advance-issue-loop.sh --help" >&2
+  exit 1
+fi
+max="${max_opt:-${args[1]:-20}}"
+effort="${effort_opt:-${args[3]:-medium}}"
 
 if ! [[ "$issue" =~ ^[1-9][0-9]*$ ]]; then
   echo "!! invalid issue number '$issue'; expected a positive integer" >&2
@@ -379,7 +436,23 @@ herdr_release() {
     --source advance-issue-loop --agent "issue #$issue" >/dev/null 2>&1 || true
 }
 
-trap 'herdr_release; exit 130' INT TERM
+# Ctrl-C is the pane being handed back, and it can arrive in the window between a
+# session's commit and the push the loop would have done next. Push first, then
+# stand down: everything else about the run is recoverable by rerunning it, and
+# an unpushed commit under a ticked checkbox is not (see push_pending).
+#
+# The handler disarms itself so a second Ctrl-C during the push is not answered
+# by a second handler, and guards the call because a signal can arrive before the
+# functions it wants exist.
+on_interrupt() {
+  trap '' INT TERM
+  echo
+  command -v push_pending >/dev/null 2>&1 && push_pending
+  herdr_release
+  exit 130
+}
+
+trap on_interrupt INT TERM
 
 # Every early exit goes through here, so no failure path can end up silent.
 die() {
@@ -390,6 +463,28 @@ die() {
   notify "$repo #$issue stopped" urgent rotating_light "$1"
   exit 1
 }
+
+# One loop at a time per repository. Two would interleave branch switches and
+# pushes, and neither could tell the other's commits from a confused session's
+# own - the difference every check below this line is built to see.
+#
+# Non-blocking on purpose: a second run is a mistake to report, not a queue to
+# join. The lock lives in the common git directory rather than the worktree, so
+# two worktrees of one repository share it; they share the remote and the issue,
+# which is what the guard is really about.
+#
+# Held on fd 9 for the life of the process, so it is released by exit however the
+# run ends, including a kill the traps never see.
+lock_dir=$(git -C "$repo_root" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || lock_dir=""
+[ -d "$lock_dir" ] || lock_dir="$repo_root/.git"
+if command -v flock >/dev/null 2>&1; then
+  exec 9>"$lock_dir/advance-issue-loop.lock" ||
+    die "Could not open the run lock in $lock_dir."
+  flock -n 9 ||
+    die "Another advance-issue-loop is already running in $repo. Wait for it, or stop it first."
+else
+  echo "!! flock not found; running without the one-loop-per-repository guard" >&2
+fi
 
 # `claude -p` in its default text format prints nothing until the session ends,
 # so a step that takes twenty minutes shows twenty minutes of an empty terminal.
@@ -484,7 +579,11 @@ run_session() {
 # Percent of each usage window, and when each one resets, as of the last session
 # that ran. Empty until a session has reported: nothing is assumed about a window
 # nobody has measured, and the gate below stays out of the way until then.
-usage_threshold=80
+usage_threshold=${ADVANCE_ISSUE_USAGE_THRESHOLD:-80}
+if ! [[ "$usage_threshold" =~ ^[0-9]+$ ]] || [ "$usage_threshold" -lt 1 ] ||
+  [ "$usage_threshold" -gt 100 ]; then
+  die "Invalid ADVANCE_ISSUE_USAGE_THRESHOLD '$usage_threshold'; expected a percentage between 1 and 100."
+fi
 limit_five=""
 limit_seven=""
 reset_five=0
@@ -592,14 +691,38 @@ worktree_status() {
 # every session, so anything ahead of the remote got there by a stop between a
 # commit and its push - and the honest repair is the push itself, which is what
 # the loop would have done had it not stopped.
-ensure_pushed() {
+#
+# Whether anything is unpushed is asked of the remote, not of the tracking ref:
+# that ref is only as fresh as the last fetch, and a stale one answers "already
+# pushed" about a commit origin has never seen. A fetch that fails leaves the
+# tracking ref as the best answer available, which is where this started.
+unpushed() {
   local ahead
-  if git rev-parse --verify --quiet "refs/remotes/origin/$branch" >/dev/null; then
-    ahead=$(git rev-list --count "refs/remotes/origin/$branch..HEAD") ||
-      die "Could not compare $branch against origin."
-    [ "$ahead" -eq 0 ] && return 0
-  fi
+  git fetch --quiet origin "$branch" >/dev/null 2>&1 || true
+  git rev-parse --verify --quiet "refs/remotes/origin/$branch" >/dev/null || return 0
+  ahead=$(git rev-list --count "refs/remotes/origin/$branch..HEAD") || return 0
+  [ "$ahead" -gt 0 ]
+}
+
+ensure_pushed() {
+  unpushed || return 0
   git push origin "$branch" || die "Push of $branch failed."
+}
+
+# The same repair on the interrupt path, where dying is no use: the run is
+# already over, and the only question left is whether the work survived it. A
+# commit the last session made but never pushed is invisible to the next run -
+# its checkbox is already ticked on the forge, so that run finds nothing to do
+# and calls the issue complete over work that never left this machine.
+push_pending() {
+  [ -n "${branch:-}" ] || return 0
+  git rev-parse --verify --quiet HEAD >/dev/null 2>&1 || return 0
+  [ "$(git branch --show-current)" = "$branch" ] || return 0
+  unpushed || return 0
+
+  echo "!! $branch has unpushed commits; pushing before standing down"
+  git push origin "$branch" ||
+    echo "!! push of $branch failed; its commits are still only on this machine"
 }
 
 # One pattern for a checkbox, shared by every helper below, and deliberately the
@@ -629,6 +752,46 @@ ticked() {
   printf '%s' "${1/- \[ \]/- [x]}"
 }
 
+# The step number a checkbox line carries, empty for one that carries none.
+# Steps written to the writing-issues contract lead with `**Step N`, and that
+# number is the step's identity.
+step_number() {
+  printf '%s\n' "$1" |
+    sed -nE 's/^[[:space:]]*- \[[ xX]\][[:space:]]*\*\*[Ss]tep[[:space:]]+([0-9]+).*/\1/p'
+}
+
+# Whether two checklist lines are the same step in the same state.
+#
+# Identical lines obviously are. So are two lines carrying the same step number,
+# whatever else changed between them: a session is free to fix a typo in the
+# heading of the step it is doing, and comparing whole lines called that a
+# session that never ticked its box - or worse, one that tampered with somebody
+# else's. The number and the tick are not the session's to change, and those are
+# what is compared. A step with no number has no such handle and is still matched
+# exactly.
+same_step() {
+  local a=$1 b=$2 na nb sa=x sb=x
+  [ "$a" = "$b" ] && return 0
+
+  na=$(step_number "$a")
+  nb=$(step_number "$b")
+  [ -n "$na" ] && [ "$na" = "$nb" ] || return 1
+
+  [[ "$a" =~ $unchecked_re ]] && sa=' '
+  [[ "$b" =~ $unchecked_re ]] && sb=' '
+  [ "$sa" = "$sb" ]
+}
+
+# Whether the step that was next has been ticked, in the body as it is now.
+step_ticked() {
+  local after=$1 want line
+  want=$(ticked "$2")
+  while IFS= read -r line; do
+    same_step "$line" "$want" && return 0
+  done < <(checklist_lines "$after")
+  return 1
+}
+
 expected_checklist() {
   local changed=false line
   while IFS= read -r line; do
@@ -651,7 +814,7 @@ checklist_preserved() {
   while IFS= read -r line; do want+=("$line"); done < <(expected_checklist "$before")
 
   while IFS= read -r line; do
-    if [ "$j" -lt "${#want[@]}" ] && [ "$line" = "${want[j]}" ]; then
+    if [ "$j" -lt "${#want[@]}" ] && same_step "$line" "${want[j]}"; then
       j=$((j + 1))
       continue
     fi
@@ -685,6 +848,12 @@ checklist_preserved() {
 #
 # Naming a step narrows the gate to that step, so the issue holding it need not
 # be closed. A bare issue reference is still met only once that issue closes.
+#
+# A gate whose issue cannot be read is reported as unread rather than as unmet:
+# both stop the run, but only one of them is about the issue. Told apart because
+# a rate limit, an outage or a typo in the reference all look exactly like an
+# open blocker otherwise, and the run then stops with a reason that sends you
+# looking at the wrong thing.
 #
 # Prints the unmet gates and returns 1; returns 0 when the next step is clear or
 # carries no gate at all.
@@ -721,8 +890,12 @@ unmet_gates() {
         case $next in
         [Ss][Tt][Ee][Pp]*) continue ;;
         esac
-        [ "$(gh issue view "$ctx" --json state -q .state 2>/dev/null)" = "CLOSED" ] ||
+        local state
+        if ! state=$(gh issue view "$ctx" --json state -q .state 2>/dev/null); then
+          unmet="${unmet:+$unmet; }#$ctx could not be read from GitHub"
+        elif [ "$state" != "CLOSED" ]; then
           unmet="${unmet:+$unmet; }#$ctx is not closed"
+        fi
         continue
       fi
 
@@ -731,9 +904,16 @@ unmet_gates() {
       # matching "Step 10".
       n=${tok##* }
       if [ -n "$ctx" ]; then
-        gh issue view "$ctx" --json body -q .body 2>/dev/null |
-          grep -qiE "^[[:space:]]*- \[[xX]\] \*\*Step ${n}[^0-9]" ||
+        # Read into a variable rather than piped into grep: a pipeline reports
+        # grep's status, so an unreadable issue and an unticked step are the
+        # same answer, and a network blip stops the run saying the wrong thing.
+        local ctx_body
+        if ! ctx_body=$(gh issue view "$ctx" --json body -q .body 2>/dev/null); then
+          unmet="${unmet:+$unmet; }#$ctx could not be read from GitHub"
+        elif ! printf '%s\n' "$ctx_body" |
+          grep -qiE "^[[:space:]]*- \[[xX]\] \*\*Step ${n}[^0-9]"; then
           unmet="${unmet:+$unmet; }#$ctx step $n is not ticked"
+        fi
       else
         printf '%s\n' "$body" | grep -qiE "^[[:space:]]*- \[[xX]\] \*\*Step ${n}[^0-9]" ||
           unmet="${unmet:+$unmet; }Step $n is not ticked"
@@ -893,7 +1073,7 @@ for ((i = 1; i <= max; i++)); do
   fi
 
   gates=$(unmet_gates "$before_body") ||
-    die "Next step of #$issue is gated: $gates. $before_open step(s) still open."
+    die "Next step of #$issue cannot start: $gates. $before_open step(s) still open."
 
   # Before the usage gate, because this stop has nothing to do with how much of
   # the window is left: the step is not this loop's to run at any budget.
@@ -952,7 +1132,7 @@ for ((i = 1; i <= max; i++)); do
   # its own box and writes down a follow-up leaves that count where it was, and
   # counting was how the run came to say "committed but ticked no checkbox"
   # about a session that had ticked exactly the right one.
-  if ! checklist_lines "$after_body" | grep -Fqx -- "$(ticked "$before_step")"; then
+  if ! step_ticked "$after_body" "$before_step"; then
     if [ "$after_open" -lt "$before_open" ]; then
       die "Session $i did not complete the next checkbox."
     elif [ "$committed" = true ]; then
