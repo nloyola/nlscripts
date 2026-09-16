@@ -32,10 +32,11 @@
 #            one thing: the pin, moved to the head that was just reported. It
 #            is how you say "seen", and it never touches a config file.
 #
-#   themes   Delegates to `qs-theme refresh`, which is already this same
-#            command for the 29 palettes that track an upstream. --write
-#            passes --write through. Nothing here has a second opinion about
-#            what a theme is.
+#   themes   Delegates to `qs-theme refresh`, which reports palette changes
+#            and added, changed or removed wallpapers for the 29 packages that
+#            track an upstream. --write passes through and applies both while
+#            preserving local wallpapers. Nothing here has a second opinion
+#            about what a theme is.
 #
 #   flakes   The `flake = false` inputs in flake.nix, compared against their
 #            branch heads. --write runs `nix flake update` for the ones that

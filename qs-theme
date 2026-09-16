@@ -20,12 +20,13 @@
 #       One resolved value for the current theme - authored or derived. This
 #       is the hook for anything that wants a colour without a template.
 #   qs-theme refresh [--write] [name...]
-#       Re-fetch every theme that names an upstream and print what has moved
-#       there since it was taken. --write applies it. See UPSTREAM below.
+#       Re-fetch every theme that names an upstream and report palette changes
+#       plus added, changed and removed package wallpapers. --write applies
+#       both while preserving local wallpapers. See UPSTREAM below.
 #   qs-theme install <repo-url> [name]
-#       Add an Omarchy theme package as a theme here: its colors.toml, the
-#       URL to track it by, and its backgrounds copied into the wallpaper
-#       library. Refuses a package that does not resolve.
+#       Add an Omarchy theme package as a theme here: its colors.toml, source
+#       metadata, and managed backgrounds in the wallpaper library. Refuses a
+#       package that does not resolve.
 #   qs-theme remove <name>
 #       Drop a theme. Leaves its wallpapers where they are.
 #   qs-theme inventory
@@ -84,10 +85,16 @@
 # them apart. Every theme here with an Omarchy package is that package's own
 # file, unedited.
 #
-# UPSTREAM. Such a theme also carries themes/<name>/upstream: one line, the
-# URL of the colors.toml it was taken from. That is what makes `refresh` a
-# command rather than a chore - the file is the whole record of where the
-# theme came from, so nothing has to remember which tree or which branch.
+# UPSTREAM. Such a theme also carries themes/<name>/upstream. Its first line is
+# the colors.toml URL; its `package` line records the Git repository, ref,
+# package root and destination wallpaper set. That makes `refresh` a command
+# rather than a chore: the file records where the whole theme came from.
+# Repository checkouts are filtered and cached under CACHE_DIR, so repeated
+# checks fetch only changed objects rather than cloning every package again.
+#
+# Wallpapers downloaded from a package are recorded in
+# WALLPAPER_LIB/<set>/.qs-theme-managed-<name>. Refresh can then remove a
+# downloaded file that disappeared upstream without touching a local addition.
 #
 # A theme that wants to differ from its upstream appends its overriding keys
 # to colors.toml under this line, on its own:
@@ -728,6 +735,79 @@ cmd_upstream_list() {
     done
 }
 
+package_source() {
+    awk '$1 == "package" && NF == 5 { print $2, $3, $4, $5; exit }' "$1"
+}
+
+replace_file() {
+    source=$1
+    dest=$2
+    [ -d "$dest" ] && [ ! -L "$dest" ] && return 1
+    tmp=$(mktemp "$dest.qs-theme.XXXXXX") || return 1
+    if cp -- "$source" "$tmp" && mv -f -- "$tmp" "$dest"; then
+        return 0
+    fi
+    rm -f -- "$tmp"
+    return 1
+}
+
+stage_upstream_wallpapers() {
+    upstream=$1
+    work=$2
+    name=$3
+    source=$(package_source "$upstream")
+    [ -n "$source" ] || return 1
+    set -- $source
+    repo=$1
+    ref=$2
+    root=$3
+    wallpaper_set=$4
+    case $wallpaper_set in ''|*/*|.*) return 2 ;; esac
+
+    command -v git >/dev/null 2>&1 || return 2
+    key=$(printf '%s\n%s\n' "$repo" "$ref" | git hash-object --stdin) || return 2
+    cache=$CACHE_DIR/upstreams/$key
+    fetched=$work/fetched-$key
+
+    if [ ! -d "$cache/.git" ]; then
+        mkdir -p "$CACHE_DIR/upstreams" || return 2
+        tmp=$cache.$$
+        rm -rf "$tmp"
+        git clone --quiet --filter=blob:none --no-checkout -- "$repo" "$tmp" 2>/dev/null || {
+            rm -rf "$tmp"
+            return 2
+        }
+        mv "$tmp" "$cache" || {
+            rm -rf "$tmp"
+            [ -d "$cache/.git" ] || return 2
+        }
+    fi
+
+    if [ -r "$fetched" ]; then
+        commit=$(cat "$fetched")
+    else
+        git -C "$cache" fetch --quiet --depth 1 origin "$ref" 2>/dev/null || return 2
+        commit=$(git -C "$cache" rev-parse FETCH_HEAD) || return 2
+        printf '%s\n' "$commit" > "$fetched" || return 2
+    fi
+
+    case $root in
+        .|'') backgrounds=backgrounds ;;
+        *)    backgrounds=${root%/}/backgrounds ;;
+    esac
+    stage=$work/wallpapers-$name
+    rm -rf "$stage"
+    mkdir -p "$stage" || return 2
+    if git -C "$cache" cat-file -e "$commit:$backgrounds" 2>/dev/null; then
+        archive=$stage.tar
+        git -C "$cache" archive -o "$archive" "$commit" -- "$backgrounds" || return 2
+        tar xf "$archive" -C "$stage" || return 2
+        rm -f "$archive"
+    fi
+    printf '%s\n' "$wallpaper_set" > "$work/wallpaper-set-$name" || return 2
+    printf '%s\n' "$stage/$backgrounds"
+}
+
 cmd_refresh() {
     write=0
     while [ $# -gt 0 ]; do
@@ -742,7 +822,7 @@ cmd_refresh() {
     [ $# -gt 0 ] || set -- $(cmd_upstream_list)
     [ $# -gt 0 ] || die "no theme names an upstream"
 
-    work=${TMPDIR:-/tmp}/qs-theme-refresh.$$
+    work=$(mktemp -d "${TMPDIR:-/tmp}/qs-theme-refresh.XXXXXX") || exit 1
     mkdir -p "$work/vet/themes" || exit 1
     trap 'rm -rf "$work"' EXIT INT TERM
 
@@ -781,30 +861,129 @@ cmd_refresh() {
             sed -n "/^$OVERRIDE_MARK\$/,\$p" "$dir/colors.toml" >> "$work/candidate"
         fi
 
-        if cmp -s "$work/candidate" "$dir/colors.toml"; then
+        theme_drift=0
+        palette_drift=0
+        if ! cmp -s "$work/candidate" "$dir/colors.toml"; then
+            # Put the candidate through the cascade before showing it, let
+            # alone writing it. An upstream that has dropped a required key
+            # would otherwise break every template the next time anything
+            # called set.
+            rm -rf "$work/vet/themes/$name"
+            mkdir -p "$work/vet/themes/$name" &&
+                cp "$work/candidate" "$work/vet/themes/$name/colors.toml" || exit 1
+            if ! ( THEME_DIR=$work/vet; resolve "$name" >/dev/null ); then
+                echo "qs-theme: $name: upstream no longer resolves, left alone" >&2
+                broke=1; continue
+            fi
+
+            theme_drift=1
+            palette_drift=1
+            echo "$name: differs from $url"
+            diff -u "$dir/colors.toml" "$work/candidate" | tail -n +3
+        fi
+
+        wallpaper_drift=0
+        wallpapers=$(stage_upstream_wallpapers "$dir/upstream" "$work" "$name")
+        status=$?
+        case $status in
+            0)
+                wallpaper_set=$(cat "$work/wallpaper-set-$name")
+                wallpaper_dir=$WALLPAPER_LIB/$wallpaper_set
+                if [ -L "$wallpapers" ]; then
+                    echo "qs-theme: $name: package backgrounds is a symlink" >&2
+                    broke=1
+                    continue
+                fi
+                current_managed=$wallpaper_dir/.qs-theme-managed-$name
+                managed=$work/managed-$name
+                wallpaper_broke=0
+                : > "$managed"
+                for f in "$wallpapers"/*; do
+                    if [ -L "$f" ]; then
+                        echo "qs-theme: $name: package background is a symlink: $(basename "$f")" >&2
+                        wallpaper_broke=1
+                        continue
+                    fi
+                    [ -f "$f" ] || continue
+                    wallpaper=$name-$(basename "$f")
+                    printf '%s\n' "$wallpaper" >> "$managed"
+                    if [ ! -e "$wallpaper_dir/$wallpaper" ] &&
+                       [ ! -L "$wallpaper_dir/$wallpaper" ]; then
+                        echo "$name: wallpaper added: $wallpaper"
+                        theme_drift=1
+                        wallpaper_drift=1
+                    elif [ -r "$current_managed" ] &&
+                         grep -Fqx -- "$wallpaper" "$current_managed"; then
+                        if ! cmp -s "$f" "$wallpaper_dir/$wallpaper"; then
+                            echo "$name: wallpaper changed: $wallpaper"
+                            theme_drift=1
+                            wallpaper_drift=1
+                        fi
+                    elif [ ! -r "$current_managed" ] &&
+                         cmp -s "$f" "$wallpaper_dir/$wallpaper"; then
+                        :
+                    else
+                        echo "qs-theme: $name: wallpaper conflicts with local file: $wallpaper" >&2
+                        wallpaper_broke=1
+                    fi
+                done
+                if [ "$wallpaper_broke" = 1 ]; then
+                    broke=1
+                    continue
+                fi
+
+                removed=$work/removed-$name
+                : > "$removed"
+                current_managed=$wallpaper_dir/.qs-theme-managed-$name
+                if [ -r "$current_managed" ]; then
+                    while IFS= read -r wallpaper || [ -n "$wallpaper" ]; do
+                        case $wallpaper in
+                            "$name"-*) ;;
+                            *) continue ;;
+                        esac
+                        case $wallpaper in */*) continue ;; esac
+                        if ! grep -Fqx -- "$wallpaper" "$managed"; then
+                            echo "$name: wallpaper removed: $wallpaper"
+                            printf '%s\n' "$wallpaper" >> "$removed"
+                            theme_drift=1
+                            wallpaper_drift=1
+                        fi
+                    done < "$current_managed"
+                elif [ -s "$managed" ] && [ "$wallpaper_drift" = 0 ]; then
+                    echo "$name: wallpaper tracking not initialized"
+                    theme_drift=1
+                    wallpaper_drift=1
+                fi ;;
+            1) ;;
+            *)
+                echo "qs-theme: $name: could not fetch its wallpaper package" >&2
+                broke=1
+                continue ;;
+        esac
+
+        if [ "$theme_drift" = 0 ]; then
             echo "$name: up to date"
             continue
         fi
-
-        # Put the candidate through the cascade before showing it, let alone
-        # writing it. An upstream that has dropped a required key would
-        # otherwise be reported as an ordinary diff and then break every
-        # template the next time anything called set.
-        rm -rf "$work/vet/themes/$name"
-        mkdir -p "$work/vet/themes/$name" &&
-            cp "$work/candidate" "$work/vet/themes/$name/colors.toml" || exit 1
-        if ! ( THEME_DIR=$work/vet; resolve "$name" >/dev/null ); then
-            echo "qs-theme: $name: upstream no longer resolves, left alone" >&2
-            broke=1; continue
-        fi
-
         drift=1
-        echo "$name: differs from $url"
-        diff -u "$dir/colors.toml" "$work/candidate" | tail -n +3
-        if [ "$write" = 1 ]; then
+        if [ "$write" = 1 ] && [ "$palette_drift" = 1 ]; then
             cp "$work/candidate" "$dir/colors.toml" || exit 1
             echo "$name: updated"
             moved="$moved $name"
+        fi
+        if [ "$write" = 1 ] && [ "$wallpaper_drift" = 1 ]; then
+            mkdir -p "$wallpaper_dir" || exit 1
+            for f in "$wallpapers"/*; do
+                [ -f "$f" ] || continue
+                replace_file "$f" "$wallpaper_dir/$name-$(basename "$f")" || exit 1
+            done
+            while IFS= read -r wallpaper || [ -n "$wallpaper" ]; do
+                if [ -n "$wallpaper" ]; then
+                    rm -f -- "$wallpaper_dir/$wallpaper" || exit 1
+                fi
+            done < "$removed"
+            replace_file "$managed" "$wallpaper_dir/.qs-theme-managed-$name" || exit 1
+            echo "$name: wallpapers updated"
         fi
     done
 
@@ -885,13 +1064,26 @@ cmd_install() {
     ( THEME_DIR=$work/vet; resolve "$name" >/dev/null ) ||
         die "$url does not resolve as a theme"
 
+    if [ -L "$work/pkg/backgrounds" ]; then
+        die "$name: package backgrounds is a symlink"
+    fi
+    if [ -d "$work/pkg/backgrounds" ]; then
+        for f in "$work/pkg/backgrounds"/*; do
+            [ -L "$f" ] &&
+                die "$name: package background is a symlink: $(basename "$f")"
+        done
+    fi
+
     branch=$(git -C "$work/pkg" rev-parse --abbrev-ref HEAD 2>/dev/null)
     [ -n "$branch" ] && [ "$branch" != HEAD ] || branch=main
 
     mkdir -p "$dir" || exit 1
     cp "$work/pkg/colors.toml" "$dir/colors.toml" || exit 1
     if raw=$(raw_colors_url "$url" "$branch"); then
-        printf '%s\n' "$raw" > "$dir/upstream"
+        {
+            printf '%s\n' "$raw"
+            printf 'package %s %s . %s\n' "$url" "$branch" "$name"
+        } > "$dir/upstream"
     else
         echo "qs-theme: $name: no known raw URL for $url, so it will not be tracked" >&2
     fi
@@ -901,15 +1093,20 @@ cmd_install() {
     # the theme name because the library is flat per set and several packages
     # ship a 1.jpg.
     n=0
+    managed=$work/managed
+    : > "$managed"
     if [ -d "$work/pkg/backgrounds" ]; then
         mkdir -p "$WALLPAPER_LIB/$name" || exit 1
         for f in "$work/pkg/backgrounds"/*; do
             [ -f "$f" ] || continue
-            cp -- "$f" "$WALLPAPER_LIB/$name/$name-$(basename "$f")" || exit 1
+            wallpaper=$name-$(basename "$f")
+            replace_file "$f" "$WALLPAPER_LIB/$name/$wallpaper" || exit 1
+            printf '%s\n' "$wallpaper" >> "$managed"
             n=$((n + 1))
         done
     fi
     if [ "$n" -gt 0 ]; then
+        replace_file "$managed" "$WALLPAPER_LIB/$name/.qs-theme-managed-$name" || exit 1
         {
             echo "# The $n backgrounds shipped with the upstream $name package,"
             echo "# copied out of its repo so nothing here depends on that clone."
