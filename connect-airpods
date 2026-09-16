@@ -42,19 +42,33 @@ connected() {
   bluetoothctl info "$AIRPODS_MAC" 2>/dev/null | grep -q "Connected: yes"
 }
 
-audio_card_visible() {
-  pactl list cards short 2>/dev/null | grep -qi "bluez_card.${AIRPODS_MAC//:/_}"
-}
+# Has PipeWire built anything for these AirPods yet - either the bluez device
+# (the card, which appears first) or the audio sink that follows it. Both name
+# the MAC with its colons replaced by underscores.
+#
+# WHY NOT pactl, WHICH THIS USED TO USE. `pactl` ships in pulseaudio-utils, a
+# package neither pipewire nor wireplumber pulls in, so it is present on some of
+# these hosts and not others. Where it was missing this returned false forever
+# and wait_for_audio below could only ever run out its timeout - silently, since
+# a missing pactl looks exactly like AirPods that have not appeared yet. pw-dump
+# ships with pipewire itself and is therefore always there. Same reasoning and
+# the same fix as rofi-audio-output.sh next door, which was ported first.
+audio_visible() {
+  local underscored="${AIRPODS_MAC//:/_}"
 
-audio_sink_visible() {
-  pactl list sinks short 2>/dev/null | grep -qi "bluez_.*${AIRPODS_MAC//:/_}"
+  pw-dump 2>/dev/null | jq -e --arg mac "$underscored" '
+    any(.[];
+      ((.info.props."device.name" // "") | startswith("bluez_card." + $mac))
+      or ((.info.props."node.name" // "") | startswith("bluez_output." + $mac))
+    )
+  ' >/dev/null 2>&1
 }
 
 wait_for_audio() {
   local waited=0
 
   while (( waited < TIMEOUT_SECONDS )); do
-    if connected && { audio_card_visible || audio_sink_visible; }; then
+    if connected && audio_visible; then
       return 0
     fi
     sleep 1
@@ -78,8 +92,8 @@ connect_airpods() {
   # `bluetoothctl trust` here was dead weight that only looked meaningful.
   # An outgoing connect like the one below needs no trust and is unaffected.
 
-  if connected && { audio_card_visible || audio_sink_visible; }; then
-    log "AirPods are already connected and visible to PulseAudio/PipeWire."
+  if connected && audio_visible; then
+    log "AirPods are already connected and visible to PipeWire."
     return 0
   fi
 
@@ -100,9 +114,9 @@ connect_airpods() {
   fi
 
   if wait_for_audio; then
-    log "AirPods connected and visible to PulseAudio/PipeWire."
+    log "AirPods connected and visible to PipeWire."
   elif connected; then
-    log "AirPods have a Bluetooth link, but PipeWire/PulseAudio did not expose an audio device yet."
+    log "AirPods have a Bluetooth link, but PipeWire did not expose an audio device yet."
     log "They may not appear in pavucontrol until that happens."
     log "Try closing/reopening the case, disconnecting them from other devices, or running: bluetoothctl power off; sleep 3; bluetoothctl power on"
     return 1
