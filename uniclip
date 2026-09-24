@@ -2,8 +2,9 @@
 # uniclip - Omarchy's universal clipboard, for a hyprlang config.
 #
 # Omarchy binds $mod+C/V/X to one copy/paste/cut pair that works everywhere:
-# in a GUI app the chord is Ctrl+C, but a terminal needs Ctrl+Insert, because
-# Ctrl+C there is SIGINT. Upstream decides between them from Lua, reading a
+# in a GUI app the chord is Ctrl+C, but a terminal needs Ctrl+Shift+C, because
+# Ctrl+C there is SIGINT. $mod+A, select all, rides along as a fourth verb.
+# Upstream decides between them from Lua, reading a
 # `terminal` tag off the focused window (default/hypr/bindings/clipboard.lua).
 #
 # Hyprland's Lua config is not available on both hosts yet - gudrun runs
@@ -11,7 +12,7 @@
 # and the chord is injected with `dispatch sendshortcut`, which every version
 # in play has.
 #
-# Usage: uniclip copy|paste|cut
+# Usage: uniclip copy|paste|cut|select-all
 #
 # WHY THE WINDOW TARGET IS EMPTY: sendshortcut takes MOD,key,window. Naming a
 # window would skip layer-shell surfaces - the quickshell menu and panels are
@@ -35,7 +36,7 @@ TERMINAL_CLASSES=(
 )
 
 usage() {
-    printf 'usage: %s copy|paste|cut\n' "${0##*/}" >&2
+    printf 'usage: %s copy|paste|cut|select-all\n' "${0##*/}" >&2
     exit 64
 }
 
@@ -74,14 +75,14 @@ send() {
 
 case "${1:-}" in
     copy)
-        if active_is_terminal; then send CTRL insert; else send CTRL c; fi
+        # Ctrl+Shift+C and Ctrl+Shift+V are the clipboard pair in alacritty,
+        # ghostty, foot, kitty and wezterm alike. Upstream used to send
+        # Ctrl+Insert and Shift+Insert and moved to these in 28ceaae; the
+        # Insert paste was never right here, because in Alacritty Shift+Insert
+        # is PasteSelection - the *primary* selection, not the clipboard.
+        if active_is_terminal; then send "CTRL SHIFT" c; else send CTRL c; fi
         ;;
     paste)
-        # Not Shift+Insert, which upstream sends: in Alacritty that is
-        # PasteSelection - the *primary* selection, not the clipboard - so the
-        # chord lands but pastes the wrong buffer, or nothing. Ctrl+Shift+V is
-        # the clipboard paste in alacritty, ghostty, foot, kitty and wezterm
-        # alike.
         if active_is_terminal; then send "CTRL SHIFT" v; else send CTRL v; fi
         ;;
     cut)
@@ -90,6 +91,12 @@ case "${1:-}" in
         # chord would fire a command rather than do nothing. Upstream sends
         # Ctrl+X unconditionally and this matches.
         send CTRL x
+        ;;
+    select-all)
+        # Unconditional, as upstream sends it. In a terminal Ctrl+A is
+        # readline's beginning-of-line rather than select all; no terminal
+        # here has a select-all chord to send instead.
+        send CTRL a
         ;;
     *)
         usage
