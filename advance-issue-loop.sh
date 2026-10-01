@@ -404,9 +404,15 @@ notify() {
 # guard spans runs rather than just this one. Counting from zero meant a second
 # run in the same pane spent its whole life under the previous run's high-water
 # mark and had every report dropped, leaving the sidebar frozen on whatever the
-# old run last said - a finished loop still reading as `working`. Seconds since
-# the epoch start above any earlier run and still step by one per report.
-herdr_seq=$(date +%s)
+# old run last said - a finished loop still reading as `working`. Nanoseconds
+# since the epoch start above any earlier run and still step by one per report.
+#
+# Nanoseconds, not seconds, because the mark also survives a release and is
+# shared with anything else that reports under this source. A by-hand cleanup
+# with `--seq "$(date +%s%N)"` (a default seq is too old to land) leaves a mark
+# no epoch-seconds seq can ever pass again, and every later run in that pane
+# was dropped wholesale.
+herdr_seq=$(date +%s%N)
 herdr_state() {
   [ "${HERDR_ENV:-}" = 1 ] && [ -n "${HERDR_PANE_ID:-}" ] || return 0
   command -v herdr >/dev/null 2>&1 || return 0
@@ -423,17 +429,33 @@ herdr_state() {
   herdr pane "${args[@]}" >/dev/null 2>&1 || true
 }
 
-# Ctrl-C means the pane has been handed back, so hand the state back with it:
-# stand down from working, then drop authority and let herdr's own detection
-# describe whatever runs there next. Releasing while still reporting `working`
-# would strand the sidebar on a session that is no longer running.
+# herdr_release <message>
+#
+# Stand down to idle, then drop authority and let herdr's own detection describe
+# whatever runs in the pane next. Releasing while still reporting `working` would
+# strand the sidebar on a session that is no longer running.
+#
+# The release carries a seq like any report: without one it is older than the
+# reports before it, and herdr drops it while still exiting 0.
 herdr_release() {
   [ "${HERDR_ENV:-}" = 1 ] && [ -n "${HERDR_PANE_ID:-}" ] || return 0
   command -v herdr >/dev/null 2>&1 || return 0
 
-  herdr_state idle "interrupted"
+  herdr_state idle "$1"
+  herdr_seq=$((herdr_seq + 1))
   herdr pane release-agent "$HERDR_PANE_ID" \
-    --source advance-issue-loop --agent "issue #$issue" >/dev/null 2>&1 || true
+    --source advance-issue-loop --agent "issue #$issue" \
+    --seq "$herdr_seq" >/dev/null 2>&1 || true
+}
+
+# A pane keeps whatever this source last told herdr until something replaces it,
+# so a pane an earlier run died in still reads `blocked` under that run's issue -
+# through the interactive work done there since, and into this run's preflight.
+# A release only clears the label it names, which is the old issue's, not this
+# one's; a report from this source replaces the old claim whatever its label, so
+# reporting first and then releasing clears it without knowing what it was.
+herdr_reset() {
+  herdr_release "starting"
 }
 
 # Ctrl-C is the pane being handed back, and it can arrive in the window between a
@@ -448,7 +470,7 @@ on_interrupt() {
   trap '' INT TERM
   echo
   command -v push_pending >/dev/null 2>&1 && push_pending
-  herdr_release
+  herdr_release "interrupted"
   exit 130
 }
 
@@ -485,6 +507,9 @@ if command -v flock >/dev/null 2>&1; then
 else
   echo "!! flock not found; running without the one-loop-per-repository guard" >&2
 fi
+
+# After the lock, so only the run that owns the repository touches its pane.
+herdr_reset
 
 # `claude -p` in its default text format prints nothing until the session ends,
 # so a step that takes twenty minutes shows twenty minutes of an empty terminal.
