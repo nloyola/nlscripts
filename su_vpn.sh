@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Usage: ./su_vpn.sh {connect|disconnect|restore}
+# Usage: ./su_vpn.sh {connect|disconnect|restore|refresh-docker|check}
 #
 # Works around a FortiClient Linux quirk where `fortivpn connect` fails with
 # "IPsec VPN failed to configure routes and DNS" because it issues
@@ -17,8 +17,69 @@ set -euo pipefail
 ACTION="${1:-}"
 VPN_PEER="130.237.242.68"
 VPN_PASS_ENTRY="su.se/nelo6128"
-STATE_FILE="/tmp/su_vpn.sh.state"
-RESOLV_BACKUP="/tmp/su_vpn.sh.resolv.conf"
+STATE_FILE="${SU_VPN_STATE_FILE:-/tmp/su_vpn.sh.state}"
+LOCK_FILE="${SU_VPN_LOCK_FILE:-/tmp/su_vpn.sh.lock}"
+RESOLV_BACKUP="${SU_VPN_RESOLV_BACKUP:-/tmp/su_vpn.sh.resolv.conf}"
+FORTIVPN="${FORTIVPN:-/opt/forticlient/fortivpn}"
+WATCHER_UNIT="su-vpn-docker-nat.service"
+# refresh-docker and check exit with this when there is no VPN session to look
+# after, so the watcher knows to stop.
+NO_SESSION=3
+
+take_lock() {
+  # connect, disconnect and restore change routes and NAT in several steps.
+  # The watcher's refresh-docker and check run from a systemd service at any
+  # moment, and check tears everything down when it sees no tunnel. Run during
+  # connect, before FortiClient is up, it would undo the connect in progress.
+  # Holding one lock across every action stops that.
+  exec 9>"$LOCK_FILE"
+  flock 9
+}
+
+try_lock() {
+  # The watcher's form of take_lock: skip this round rather than wait. Whatever
+  # holds the lock is about to leave the routes in a known state anyway.
+  exec 9>"$LOCK_FILE"
+  flock -n 9
+}
+
+tunnel_status() {
+  # up, down or unknown. Only FortiClient knows whether the tunnel is up: the
+  # state file outlives a tunnel that dies on its own (suspend, network change,
+  # server timeout), because nothing runs `disconnect`. A status that times out
+  # or reads as anything else is unknown, never down - tearing down a live
+  # tunnel is worse than leaving a dead one for the next check.
+  local status
+  status="$(timeout 3 "$FORTIVPN" status 2>&1 || true)"
+  if grep -q "Status: Connected" <<<"$status"; then
+    echo up
+  elif grep -qE "Status: (Not Running|Disconnected)" <<<"$status"; then
+    echo down
+  else
+    echo unknown
+  fi
+}
+
+set_state() {
+  # Replace KEY in the state file rather than append to it: refresh-docker runs
+  # on every Docker network event, so appending grew the file by one line each
+  # time.
+  local key="$1" value="$2" tmp
+  tmp="$(mktemp "${STATE_FILE}.XXXXXX")"
+  grep -v "^${key}=" "$STATE_FILE" > "$tmp" 2>/dev/null || true
+  printf '%s=%q\n' "$key" "$value" >> "$tmp"
+  mv "$tmp" "$STATE_FILE"
+}
+
+reap_dead_tunnel() {
+  # The tunnel died without `disconnect`. Its SNAT rules still rewrite every
+  # container's traffic to the VPN address, which no longer exists, so the
+  # containers lose the internet while the host, back on the LAN, never
+  # notices. Tear down exactly as `disconnect` would. Callers have already
+  # seen tunnel_status say down.
+  echo "su_vpn.sh: the VPN tunnel is gone but its routes and NAT are still in place; restoring." >&2
+  restore_routes
+}
 
 check_pass_entry() {
   # `pass <name>` on a *directory* prints a tree listing and still exits 0, so
@@ -101,7 +162,7 @@ restore_resolv_conf() {
 wait_vpn_stopped() {
   local status
   for _ in {1..3}; do
-    status="$(timeout 2 /opt/forticlient/fortivpn status 2>&1 || true)"
+    status="$(timeout 2 "$FORTIVPN" status 2>&1 || true)"
     grep -q "Status: Not Running" <<<"$status" && return 0
     sleep 1
   done
@@ -213,7 +274,9 @@ reassert_tailscale() {
   # user's prefs: only acts when Tailscale is meant to be running.
   command -v tailscale >/dev/null 2>&1 || return 0
   local state
-  state="$(tailscale status --json 2>/dev/null | awk -F'"' '/"BackendState"/ {print $4; exit}')"
+  # `|| true`: tailscale status fails while tailscaled is stopped, and under
+  # pipefail that would abort the teardown before it removes the state file.
+  state="$(tailscale status --json 2>/dev/null | awk -F'"' '/"BackendState"/ {print $4; exit}' || true)"
   [[ "$state" == "Running" ]] || return 0
 
   local op
@@ -271,7 +334,7 @@ configure_docker_vpn_nat() {
   local vpn_source subnet iface
   vpn_source="$(default_route_source)"
   [[ -n "$vpn_source" ]] || return 0
-  printf 'VPN_SOURCE=%q\n' "$vpn_source" >> "$STATE_FILE"
+  set_state VPN_SOURCE "$vpn_source"
 
   # Remove any older su_vpn.sh rules first. Stale rules can reference deleted
   # Docker bridges, and rules without the localhost exclusion break published
@@ -340,14 +403,31 @@ restore_routes() {
   rm -f "$STATE_FILE"
 }
 
+start_watcher() {
+  # The watcher (su_vpn_docker_watch.sh) runs only while connected: it keeps the
+  # SNAT ahead of Docker's own rules and tears everything down if the tunnel
+  # dies on its own. Hosts without the unit (it comes from the docker_vpn
+  # Ansible role) simply go without it.
+  systemctl cat "$WATCHER_UNIT" >/dev/null 2>&1 || return 0
+  sudo systemctl start "$WATCHER_UNIT" 2>/dev/null \
+    || echo "su_vpn.sh: warning: could not start $WATCHER_UNIT." >&2
+}
+
+stop_watcher() {
+  # --no-block: the watcher would stop on its own within POLL seconds anyway,
+  # so don't hold up disconnect waiting for it.
+  systemctl cat "$WATCHER_UNIT" >/dev/null 2>&1 || return 0
+  sudo systemctl stop --no-block "$WATCHER_UNIT" 2>/dev/null || true
+}
+
 require_forticlient() {
   # FortiClient Linux is a registration-gated manual install, so it is
   # not on every host this script can now reach. Check before anything else in
   # `connect`: everything below deletes the default route and relies on the EXIT
   # trap to put it back, so discovering the binary is missing at the `spawn`
   # line would cost a round trip through being offline for no reason at all.
-  [ -x /opt/forticlient/fortivpn ] && return 0
-  echo "su_vpn.sh: /opt/forticlient/fortivpn is not installed." >&2
+  [ -x "$FORTIVPN" ] && return 0
+  echo "su_vpn.sh: $FORTIVPN is not installed." >&2
   echo "su_vpn.sh: FortiClient Linux is a manual, registration-gated download -" >&2
   echo "su_vpn.sh: https://www.fortinet.com/support/product-downloads" >&2
   return 1
@@ -359,6 +439,7 @@ case "$ACTION" in
     # while the network is still intact, not after we have deleted the default.
     require_forticlient || exit 1
     check_pass_entry || exit 1
+    take_lock
     warn_if_tailscale_exit_node
     remove_stale_vpn_addrs
     save_resolv_conf
@@ -380,10 +461,12 @@ case "$ACTION" in
     rc=0
     # The entry *name* (not the secret) is passed through the environment so the
     # expect script below can stay single-quoted and share the constant above.
-    VPN_PASS_ENTRY="$VPN_PASS_ENTRY" expect -c '
+    # `9>&-`: the FortiClient daemon this spawns outlives the script, and an
+    # inherited lock descriptor would hold the lock for the life of the tunnel.
+    VPN_PASS_ENTRY="$VPN_PASS_ENTRY" FORTIVPN="$FORTIVPN" expect -c '
       set timeout 60
       log_user 1
-      spawn /opt/forticlient/fortivpn connect SU-Linux-vpn -u nelo6128
+      spawn $env(FORTIVPN) connect SU-Linux-vpn -u nelo6128
       set connected 0
       expect {
         -re "(?i)Password:" {
@@ -399,13 +482,14 @@ case "$ACTION" in
         timeout { }
       }
       exit [expr {$connected ? 0 : 1}]
-    ' || rc=$?
+    ' 9>&- || rc=$?
 
     if [[ $rc -eq 0 ]]; then
       trap - EXIT
       # Re-pin Docker routes and SNAT container traffic to the VPN source address.
       pin_docker_routes
       configure_docker_vpn_nat
+      start_watcher
       echo "su_vpn.sh: VPN connected. Run 'su_vpn.sh disconnect' to tear down and restore routes."
     else
       echo "su_vpn.sh: connect failed; restoring routes." >&2
@@ -413,30 +497,57 @@ case "$ACTION" in
     fi
     ;;
   disconnect)
-    timeout 5 /opt/forticlient/fortivpn disconnect || pkill fortivpn || true
+    take_lock
+    timeout 5 "$FORTIVPN" disconnect 9>&- || pkill fortivpn || true
     wait_vpn_stopped || pkill fortivpn || true
     restore_routes
+    stop_watcher
     echo "VPN Disconnected."
     ;;
   restore)
     # Emergency restore if the tunnel died but routes were left in place.
+    take_lock
     restore_routes
+    stop_watcher
     echo "Routes restored."
     ;;
   refresh-docker)
     # Re-apply the Docker<->VPN routes and NAT for the *current* set of bridges.
-    # Safe to call anytime: a no-op unless the VPN is up (STATE_FILE present).
+    # Safe to call anytime: a no-op unless the VPN is up. A state file left by
+    # a tunnel that died is torn down instead, since NAT to its address would
+    # cut the containers off. Exits NO_SESSION once there is no session left.
     # Docker rebuilds its iptables and can create new bridges on every
     # `compose up`, which leaves connect-time rules stale/mis-ordered; the
     # su-vpn-docker-nat.service watcher calls this on Docker network events so
     # containers (re)started AFTER `connect` still route out the tunnel instead
     # of black-holing with "Host is unreachable".
-    [[ -f "$STATE_FILE" ]] || exit 0
-    pin_docker_routes
-    configure_docker_vpn_nat
+    [[ -f "$STATE_FILE" ]] || exit "$NO_SESSION"
+    try_lock || exit 0
+    case "$(tunnel_status)" in
+      up)
+        pin_docker_routes
+        configure_docker_vpn_nat
+        ;;
+      down)
+        reap_dead_tunnel
+        exit "$NO_SESSION"
+        ;;
+      *) ;;
+    esac
+    ;;
+  check)
+    # Tear down if the tunnel has died. A dying tunnel raises no Docker event,
+    # so the watcher also calls this on a timer. Exits NO_SESSION once there is
+    # no session left: none to begin with, or this call just tore it down.
+    [[ -f "$STATE_FILE" ]] || exit "$NO_SESSION"
+    try_lock || exit 0
+    [[ -f "$STATE_FILE" ]] || exit "$NO_SESSION"
+    [[ "$(tunnel_status)" == down ]] || exit 0
+    reap_dead_tunnel
+    exit "$NO_SESSION"
     ;;
   *)
-    echo "Usage: $0 {connect|disconnect|restore|refresh-docker}" >&2
+    echo "Usage: $0 {connect|disconnect|restore|refresh-docker|check}" >&2
     exit 1
     ;;
 esac
