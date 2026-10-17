@@ -53,6 +53,45 @@ write_osd() {
     "$kind" "$value" "$label" "$icon" "$(now_ms)" > "$state_file"
 }
 
+# A HELD volume-up GOES AT MOST 30 POINTS PAST ITS FIRST REPEAT. Hyprland's
+# bindel calls this script once per key repeat, 40 ms apart, until the key is
+# released - and a release can go missing. On 2026-10-17 the link to asterix
+# dropped while volume-up was down on asterix's keyboard; lan-mouse on gudrun
+# held the key until its peer timed out, most of a minute later, and the
+# EMBERTON was at full volume within two seconds.
+#
+# Calls less than 200 ms apart are one run of repeats; a gap of more starts a
+# new run. Tapping a key is slower than that and is never capped, but the
+# Q3 Max's knob sends a detent every ~160 ms when turned briskly, so one long
+# fast spin is a run and stops at the cap like a held key; pausing resets it. The
+# first repeat comes 600 ms after the press and so opens the run itself - one
+# press plus one repeat ahead of the cap, which a stuck key therefore stops
+# 30 points plus two steps above where it began. Capped calls still stamp the
+# time, so a key stuck for a minute stays one run rather than earning a fresh
+# 30 points every time a repeat lands late.
+#
+# The repeats are separate processes that overlap, so the read-modify-write of
+# the run file is under flock.
+volume_up_allowed() {
+  step=$1
+  run_file="${XDG_RUNTIME_DIR:-/tmp}/qs-osd-volume-run"
+  exec 9>>"$run_file.lock"
+  flock 9
+  now=$(now_ms)
+  last=0
+  risen=0
+  [ -r "$run_file" ] && read -r last risen <"$run_file"
+  case "$last$risen" in *[!0-9]*|"") last=0 risen=0 ;; esac
+  if [ $((now - last)) -gt 200 ]; then
+    risen=0
+  else
+    risen=$((risen + step))
+  fi
+  echo "$now $risen" >"$run_file"
+  exec 9>&-
+  [ "$risen" -le 30 ]
+}
+
 volume_value() {
   pulsemixer --get-volume 2>/dev/null | awk '{print int(($1 + $2) / 2)}'
 }
@@ -84,7 +123,9 @@ ddc_set_all() {
 
 case "$1" in
   volume-up)
-    pulsemixer --change-volume "+${2:-2}"
+    step=${2:-2}
+    volume_up_allowed "$step" || exit 0
+    pulsemixer --change-volume "+$step"
     value=$(volume_value)
     write_osd volume "${value:-0}" "Volume ${value:-0}%" ""
     ;;
