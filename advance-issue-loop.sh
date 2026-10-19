@@ -31,7 +31,13 @@
 # issue title unless a name is given; resuming an issue whose branch already
 # exists switches to it rather than starting over.
 #
-# Every run requires a clean tree. Starting an issue also requires the default
+# Every run requires a clean tree, with one exception: a tree this loop's own
+# session left dirty when the run stopped partway through a step. The loop
+# records what that tree looked like as it stopped, and a rerun that finds the
+# same tree, on the same branch, with the same step still next, hands it to the
+# next session to finish. Any other dirt - a change since the stop, another
+# session's work in the checkout - is still refused. Starting an issue also
+# requires the default
 # branch checked out and every blocking issue closed. Refusing to stack a new
 # issue on unmerged work is the point: dependencies are satisfied by merging
 # them, not by branching off them, so the base a step is written against is the
@@ -165,7 +171,8 @@ usage: advance-issue-loop.sh [--here] [--max n] [--effort level]
 Options:
   --here         Work the issue on the currently checked-out branch instead of
                  cutting a new one, and skip the default-branch and blocker
-                 checks. The working tree must still be clean. Refuses on a
+                 checks. The working tree must still be clean, unless it is
+                 the loop's own interrupted step. Refuses on a
                  detached HEAD or on the default branch itself,
                  and cannot be combined with an explicit branch argument.
   --max n        Same as the max-sessions argument, without having to fill the
@@ -466,10 +473,12 @@ herdr_reset() {
 # The handler disarms itself so a second Ctrl-C during the push is not answered
 # by a second handler, and guards the call because a signal can arrive before the
 # functions it wants exist.
+# shellcheck disable=SC2329 # invoked by the trap below
 on_interrupt() {
   trap '' INT TERM
   echo
   command -v push_pending >/dev/null 2>&1 && push_pending
+  command -v record_interrupted >/dev/null 2>&1 && record_interrupted
   herdr_release "interrupted"
   exit 130
 }
@@ -479,6 +488,7 @@ trap on_interrupt INT TERM
 # Every early exit goes through here, so no failure path can end up silent.
 die() {
   echo "!! $1"
+  command -v record_interrupted >/dev/null 2>&1 && record_interrupted
   # Blocked rather than idle: an early stop is waiting for a human, and the
   # sidebar should say so as loudly as ntfy does.
   herdr_state blocked "$1"
@@ -711,6 +721,46 @@ worktree_status() {
   git -C "$repo_root" status --porcelain=v1 --untracked-files=all --ignore-submodules=none
 }
 
+# What a session left behind when the run stopped mid-step, so a rerun can tell
+# its own unfinished step from anybody else's dirt. Beside the run lock, for the
+# same reason the lock lives there.
+interrupted_file="$lock_dir/advance-issue-loop.interrupted"
+
+# The step a session is working, set for exactly as long as a stop could leave
+# that session's work in the tree.
+session_step=""
+
+# One hash over HEAD, the status, every tracked change and every untracked
+# file's content: any edit, addition or removal since the stop changes it.
+worktree_fingerprint() {
+  {
+    git -C "$repo_root" rev-parse HEAD &&
+      worktree_status &&
+      git -C "$repo_root" diff HEAD --binary --no-ext-diff &&
+      git -C "$repo_root" ls-files -z --others --exclude-standard |
+      (cd "$repo_root" && xargs -0 -r git hash-object --)
+  } | git hash-object --stdin
+}
+
+# Called on every stop. Never dies: it runs from die itself.
+record_interrupted() {
+  local status fp
+  [ -n "$session_step" ] || return 0
+  status=$(worktree_status 2>/dev/null) || return 0
+  [ -n "$status" ] || return 0
+  fp=$(worktree_fingerprint 2>/dev/null) || return 0
+  if printf 'issue=%s\nbranch=%s\nfingerprint=%s\nstep=%s\n' \
+    "$issue" "$(git -C "$repo_root" branch --show-current)" "$fp" "$session_step" \
+    >"$interrupted_file.tmp" 2>/dev/null &&
+    mv -f -- "$interrupted_file.tmp" "$interrupted_file" 2>/dev/null; then
+    echo "!! recorded the unfinished step; rerun with the tree as it is to resume it"
+  fi
+}
+
+interrupted_field() {
+  sed -n "s/^$1=//p" "$interrupted_file" 2>/dev/null | head -n1
+}
+
 # Completion is announced to the user, to ntfy and to herdr, and must not be
 # announced over commits that exist only on this machine. The loop pushes after
 # every session, so anything ahead of the remote got there by a stop between a
@@ -739,6 +789,7 @@ ensure_pushed() {
 # commit the last session made but never pushed is invisible to the next run -
 # its checkbox is already ticked on the forge, so that run finds nothing to do
 # and calls the issue complete over work that never left this machine.
+# shellcheck disable=SC2329 # invoked from on_interrupt
 push_pending() {
   [ -n "${branch:-}" ] || return 0
   git rev-parse --verify --quiet HEAD >/dev/null 2>&1 || return 0
@@ -1017,8 +1068,23 @@ if [ "$here" = true ]; then
 fi
 
 initial_status=$(worktree_status) || die "Could not inspect the working tree."
-[ -z "$initial_status" ] ||
-  die "Working tree is dirty; clean it before running issue #$issue."
+resume_step=""
+if [ -z "$initial_status" ]; then
+  # A clean tree owes nothing to an earlier stop, whatever it recorded.
+  rm -f -- "$interrupted_file"
+else
+  [ -f "$interrupted_file" ] && [ "$(interrupted_field issue)" = "$issue" ] ||
+    die "Working tree is dirty; clean it before running issue #$issue."
+  resume_branch=$(interrupted_field branch)
+  [ "$(worktree_fingerprint)" = "$(interrupted_field fingerprint)" ] &&
+    [ "$resume_branch" = "$base" ] ||
+    die "Working tree is dirty and no longer matches what the loop left when it stopped on issue #$issue; finish or clean it by hand."
+  [ -z "$branch_arg" ] || [ "$branch_arg" = "$resume_branch" ] ||
+    die "The unfinished step of issue #$issue is on $resume_branch, not $branch_arg."
+  branch_arg="$resume_branch"
+  resume_step=$(interrupted_field step)
+  echo "==> resuming the unfinished step of issue #$issue that the last run left in the tree"
+fi
 
 # An issue is identified by its number, not by the exact branch name: a branch
 # named by hand belongs to the issue just as much as a derived one does, and
@@ -1083,6 +1149,12 @@ fi
 initial_body=$(issue_body) || die "Could not read issue #$issue from GitHub."
 total=$(printf '%s\n' "$initial_body" | grep -cE "$checkbox_re" || true)
 
+# Checked before any session, and before the loop can call an issue complete
+# over a tree that still holds a step's unfinished work.
+if [ -n "$resume_step" ] && ! same_step "$(first_unchecked "$initial_body")" "$resume_step"; then
+  die "The unfinished work in the tree is for '$resume_step', which is no longer the next step of #$issue; finish or clean it by hand."
+fi
+
 for ((i = 1; i <= max; i++)); do
   before_body=$(issue_body) || die "Could not read issue #$issue from GitHub."
   before_open=$(count_unchecked "$before_body")
@@ -1110,14 +1182,19 @@ for ((i = 1; i <= max; i++)); do
   # everything the last session did and left the next step untouched.
   usage_gate "$i" "$before_open"
 
-  session_status=$(worktree_status) || die "Could not inspect the working tree before session $i."
-  [ -z "$session_status" ] || die "Working tree became dirty before session $i."
-  before_head=$(git rev-parse HEAD) || die "Could not inspect HEAD before session $i."
   before_step=$(first_unchecked "$before_body")
+  session_status=$(worktree_status) || die "Could not inspect the working tree before session $i."
+  prompt="Use the advance-issue-step skill to implement the next unchecked step of GitHub issue #$issue."
+  if [ -n "$session_status" ]; then
+    [ -n "$resume_step" ] || die "Working tree became dirty before session $i."
+    prompt+=" An earlier session of this loop stopped partway through that same step, and the uncommitted changes in the working tree are its work in progress, not another session's: review them against the step's spec, finish the step, and commit them as part of it."
+  fi
+  before_head=$(git rev-parse HEAD) || die "Could not inspect HEAD before session $i."
   echo "==> session $i starting at $effort effort: $before_open step(s) remaining"
   herdr_state working "session $i, $((total - before_open))/$total done"
 
-  run_session "Use the advance-issue-step skill to implement the next unchecked step of GitHub issue #$issue. Stay on the current branch ($branch); do not create, switch, or merge branches, and do not open a pull request." ||
+  session_step="$before_step"
+  run_session "$prompt Stay on the current branch ($branch); do not create, switch, or merge branches, and do not open a pull request." ||
     die "Session $i exited non-zero. $before_open step(s) still open."
 
   read_usage
@@ -1167,6 +1244,9 @@ for ((i = 1; i <= max; i++)); do
   fi
   checklist_preserved "$before_body" "$after_body" ||
     die "Session $i changed checkboxes other than the next one."
+  session_step=""
+  resume_step=""
+  rm -f -- "$interrupted_file"
 
   # A ticked step with no commit is a verification: the step asked whether
   # something already held and found that it did. Said out loud rather than

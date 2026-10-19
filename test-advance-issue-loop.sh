@@ -58,6 +58,7 @@ EOF
 
   cat >"$root/bin/claude" <<'EOF'
 #!/usr/bin/env bash
+printf '%s\n' "${!#}" >>"$TEST_STATE/prompts"
 python3 - "$TEST_STATE/body" <<'PY'
 from pathlib import Path
 import os
@@ -72,6 +73,8 @@ elif mode == 'tick-two-add-one':
     body = body.replace('- [ ]', '- [x]') + '- [ ] **Step 3 - Unplanned work**\n'
 elif mode == 'add-followup':
     body = body.replace('- [ ]', '- [x]', 1) + '- [ ] **Step 2 - Work this uncovered**\n'
+elif mode == 'dirty':
+    pass
 elif mode == 'tick-second':
     first = body.find('- [ ]')
     second = body.find('- [ ]', first + 1)
@@ -104,6 +107,10 @@ case "${TEST_CLAUDE_MODE:-normal}" in
     git reset --quiet --hard HEAD~1
     ;;
   verify)
+    ;;
+  finish)
+    git add -A
+    git commit --quiet -m 'finish interrupted step'
     ;;
   *)
     printf 'session\n' >>session-work
@@ -318,6 +325,72 @@ test_here_rejects_preexisting_dirtiness() {
     return
   fi
   pass "--here rejects pre-existing dirtiness"
+}
+
+# A run stopped by its own session's leftovers, then rerun.
+interrupt_case() {
+  local root=$1
+  (cd "$root/repo" &&
+    PATH="$root/bin:$PATH" TEST_STATE="$root/state" TEST_CLAUDE_MODE=dirty NTFY_TOPIC="test" \
+      "$script" --here 1 1 "" low) >"$root/first-output" 2>&1
+  : >"$root/state/prompts"
+}
+
+rerun_case() {
+  local root=$1 mode=$2
+  (cd "$root/repo" &&
+    PATH="$root/bin:$PATH" TEST_STATE="$root/state" TEST_CLAUDE_MODE="$mode" NTFY_TOPIC="test" \
+      "$script" --here 1 1 "" low) >"$root/output" 2>&1
+}
+
+test_interrupted_step_is_resumed() {
+  local root rc=0
+  root=$(setup_case resume-interrupted)
+  interrupt_case "$root"
+  rerun_case "$root" finish || rc=$?
+
+  if [ "$rc" -ne 0 ] || ! grep -Fq 'stopped partway through that same step' "$root/state/prompts" ||
+    [ -n "$(git -C "$root/repo" status --porcelain)" ] ||
+    [ -e "$root/repo/.git/advance-issue-loop.interrupted" ]; then
+    fail "a step the loop's own session left unfinished is resumed"
+    printf '  exit: %s\n' "$rc"
+    while IFS= read -r line; do printf '  %s\n' "$line"; done <"$root/output"
+    return
+  fi
+  pass "a step the loop's own session left unfinished is resumed"
+}
+
+test_resume_refuses_a_changed_tree() {
+  local root rc=0
+  root=$(setup_case resume-changed)
+  interrupt_case "$root"
+  printf 'someone else\n' >"$root/repo/other-session"
+  rerun_case "$root" finish || rc=$?
+
+  if [ "$rc" -eq 0 ] || [ -s "$root/state/prompts" ] ||
+    ! grep -Fq "!! Working tree is dirty and no longer matches what the loop left" "$root/output"; then
+    fail "resume refuses a tree changed since the loop stopped"
+    while IFS= read -r line; do printf '  %s\n' "$line"; done <"$root/output"
+    return
+  fi
+  pass "resume refuses a tree changed since the loop stopped"
+}
+
+test_resume_refuses_once_the_step_is_ticked() {
+  local root rc=0
+  root=$(setup_case resume-ticked)
+  printf '%s\n' '- [ ] **Step 1 - Complete work**' '- [ ] **Step 2 - More work**' >"$root/state/body"
+  interrupt_case "$root"
+  sed -i 's/- \[ \] \*\*Step 1/- [x] **Step 1/' "$root/state/body"
+  rerun_case "$root" finish || rc=$?
+
+  if [ "$rc" -eq 0 ] || [ -s "$root/state/prompts" ] ||
+    ! grep -Fq "is no longer the next step" "$root/output"; then
+    fail "resume refuses once the interrupted step is no longer next"
+    while IFS= read -r line; do printf '  %s\n' "$line"; done <"$root/output"
+    return
+  fi
+  pass "resume refuses once the interrupted step is no longer next"
 }
 
 test_new_dirtiness_outside_starting_subdirectory_is_rejected() {
@@ -614,6 +687,9 @@ test_ambiguous_issue_branches_are_rejected
 test_session_branch_switch_is_rejected
 test_session_uncommitted_changes_are_rejected
 test_here_rejects_preexisting_dirtiness
+test_interrupted_step_is_resumed
+test_resume_refuses_a_changed_tree
+test_resume_refuses_once_the_step_is_ticked
 test_new_dirtiness_outside_starting_subdirectory_is_rejected
 test_multiple_completed_checkboxes_are_rejected
 test_compensated_checkbox_changes_are_rejected
