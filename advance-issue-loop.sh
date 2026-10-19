@@ -588,6 +588,14 @@ fi
 # `claude -p` with no terminal has nothing to say to herdr anyway.
 hide_herdr=(env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SOCKET_PATH)
 
+# The advance-issue-step skill pushes before it ticks, with a bare `git push` to
+# the configured upstream. acceptEdits does not cover that, and a repository's
+# allow rules tend to name a remote and branch, which a bare push never matches;
+# a session that cannot push refuses to tick, and the run stops on a finished
+# step. Exactly that command is allowed, nothing wider. The push the loop makes
+# after each session stays: it is what catches a session that committed and died.
+session_flags=(--permission-mode acceptEdits --allowedTools "Bash(git push)")
+
 # run_session <prompt>
 #
 # Returns claude's own exit status, not the renderer's: a jq hiccup must not be
@@ -595,7 +603,7 @@ hide_herdr=(env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SOCKET_PATH)
 # that exited cleanly on partial input.
 run_session() {
   if [ -z "$stream" ]; then
-    "${hide_herdr[@]}" claude -p --permission-mode acceptEdits --effort "$effort" "$1"
+    "${hide_herdr[@]}" claude -p "${session_flags[@]}" --effort "$effort" "$1"
     return $?
   fi
 
@@ -604,7 +612,7 @@ run_session() {
   # then never races the writer.
   : >"$stream_file"
   "${hide_herdr[@]}" claude -p --output-format stream-json --verbose \
-    --permission-mode acceptEdits --effort "$effort" "$1" |
+    "${session_flags[@]}" --effort "$effort" "$1" |
     tee "$stream_file" |
     jq -r --unbuffered "$progress_filter"
   local rc=${PIPESTATUS[0]}
