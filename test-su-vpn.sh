@@ -71,7 +71,7 @@ EOF
 #!/usr/bin/env bash
 case "$*" in
   "-4 route show default") echo "$TEST_DEFAULT_ROUTE" ;;
-  *addr\ show*) ;;
+  *addr\ show*) if [[ -n "${TEST_ADDRS:-}" ]]; then echo "$TEST_ADDRS"; fi ;;
   *) printf 'ip %s\n' "$*" >>"$TEST_ROOT/calls" ;;
 esac
 EOF
@@ -98,7 +98,7 @@ EOF
 [[ "$1" == cat && -n "${TEST_HAVE_UNIT:-}" ]]
 EOF
 
-  for cmd in tailscale dig resolvectl pkill; do
+  for cmd in tailscale dig resolvectl pkill nmcli; do
     printf '#!/usr/bin/env bash\nexit 1\n' >"$root/bin/$cmd"
   done
   chmod +x "$root"/bin/*
@@ -206,6 +206,32 @@ dead_tunnel_leftovers
 "$script" restore >/dev/null 2>&1
 desc='restore on a host without the watcher unit leaves systemd alone'
 check systemctl_not_called
+
+# What the box looked like after the 2026-10-18 reboot: shut down with the
+# tunnel up, so /tmp lost the state file, but FortiClient put its address,
+# gatewayless default route and DNS server back at boot.
+setup_case disconnect-after-reboot
+export TEST_DEFAULT_ROUTE='default dev br0 proto static scope link src 10.240.228.6 mtu 1400'
+export TEST_ADDRS='10: br0    inet 10.240.228.6/32 scope global br0'
+"$script" disconnect >/dev/null 2>&1
+desc='disconnect without a state file removes the VPN address'
+check grep -qxF 'ip addr del 10.240.228.6/32 dev br0' "$TEST_ROOT/calls"
+desc="disconnect without a state file removes FortiClient's default route"
+check grep -qxF 'ip route del default dev br0 proto static scope link' "$TEST_ROOT/calls"
+desc='disconnect without a state file has NetworkManager put back its routes'
+check grep -qxF 'sudo nmcli device reapply br0' "$TEST_ROOT/calls"
+desc="disconnect without a state file has NetworkManager put back its DNS"
+check grep -qxF 'sudo nmcli general reload dns-full' "$TEST_ROOT/calls"
+
+setup_case disconnect-normal
+printf 'GATEWAY=192.168.50.1\nDEVICE=br0\nVPN_SOURCE=10.240.228.5\n' >"$SU_VPN_STATE_FILE"
+"$script" disconnect >/dev/null 2>&1
+desc='disconnect restores the saved default route'
+check grep -qxF 'ip route replace default via 192.168.50.1 dev br0' "$TEST_ROOT/calls"
+desc="disconnect has NetworkManager put back its DNS"
+check grep -qxF 'sudo nmcli general reload dns-full' "$TEST_ROOT/calls"
+desc='disconnect leaves a default route with a gateway alone'
+check test -z "$(grep 'ip route del default' "$TEST_ROOT/calls")"
 
 # The watcher, against a fake su_vpn.sh that records each action and answers
 # NO_SESSION (3) once the fake session flag is gone.

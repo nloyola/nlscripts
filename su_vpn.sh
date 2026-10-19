@@ -141,6 +141,15 @@ clear_resolved_global_dns() {
   sudo systemctl reload systemd-resolved 2>/dev/null || true
 }
 
+restore_networkmanager_dns() {
+  # FortiClient can also put SU's resolver on the LAN link itself (per-link,
+  # e.g. "Link br0: 193.11.30.200"), replacing NetworkManager's servers, and
+  # unreachable once the tunnel is gone. Have NetworkManager push its own
+  # per-link DNS back into resolved. A device reapply does not do this.
+  command -v nmcli >/dev/null 2>&1 || return 0
+  sudo nmcli general reload dns-full 2>/dev/null || true
+}
+
 restore_resolv_conf() {
   # On systemd-resolved hosts /etc/resolv.conf is a symlink to resolved's stub;
   # restore that symlink rather than copying a flat file over it, which would
@@ -156,6 +165,7 @@ restore_resolv_conf() {
   # The symlink restore above only fixes the stub file; resolved's stranded
   # global DNS lives in its runtime state and must be cleared separately.
   clear_resolved_global_dns
+  restore_networkmanager_dns
   rm -f "$RESOLV_BACKUP"
 }
 
@@ -380,23 +390,43 @@ remove_stale_vpn_addrs() {
       done
 }
 
+remove_forticlient_default_routes() {
+  # FortiClient's default route is the one without a gateway:
+  # "default dev br0 proto static scope link src <VPN address>". Found in the
+  # live table rather than the state file, because it can outlive that file: a
+  # shutdown with the tunnel up loses /tmp, yet FortiClient puts the route back
+  # at boot. It can also be there twice. Prints the device of each one removed.
+  local dev
+  while read -r dev; do
+    [[ -n "$dev" ]] || continue
+    sudo ip route del default dev "$dev" proto static scope link 2>/dev/null || true
+    echo "$dev"
+  done < <(ip -4 route show default \
+    | awk '!/ via / && / proto static / && / scope link / {
+             for (i = 1; i <= NF; i++) if ($i == "dev") { print $(i+1); break }
+           }')
+}
+
 restore_routes() {
+  local GATEWAY="" DEVICE="" VPN_SOURCE="" stranded dev
   remove_docker_vpn_nat
-  if [[ ! -f "$STATE_FILE" ]]; then
-    remove_stale_vpn_addrs
-    restore_resolv_conf
-    reassert_tailscale
-    return 0
+  if [[ -f "$STATE_FILE" ]]; then
+    # shellcheck disable=SC1090
+    source "$STATE_FILE"
   fi
-  local GATEWAY="" DEVICE="" VPN_SOURCE=""
-  # shellcheck disable=SC1090
-  source "$STATE_FILE"
   sudo ip route del "$VPN_PEER/32" 2>/dev/null || true
-  remove_docker_vpn_nat
+  stranded="$(remove_forticlient_default_routes)"
   remove_vpn_source_addr
   remove_stale_vpn_addrs
   if [[ -n "$GATEWAY" && -n "$DEVICE" ]]; then
     sudo ip route replace default via "$GATEWAY" dev "$DEVICE"
+  elif command -v nmcli >/dev/null 2>&1; then
+    # No saved gateway to put back - the state file went with /tmp - so let
+    # NetworkManager reinstall the routes it owns on each device we stripped.
+    while read -r dev; do
+      [[ -n "$dev" ]] || continue
+      sudo nmcli device reapply "$dev" 2>/dev/null || true
+    done < <(sort -u <<<"$stranded")
   fi
   restore_resolv_conf
   reassert_tailscale
