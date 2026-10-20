@@ -596,14 +596,25 @@ hide_herdr=(env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SOCKET_PATH)
 # after each session stays: it is what catches a session that committed and died.
 session_flags=(--permission-mode acceptEdits --allowedTools "Bash(git push)")
 
-# run_session <prompt>
+# A headless session has no scratchpad, and acceptEdits approves writes only
+# inside the repository. A session that needs a scratch file - an issue comment
+# body, a gate log - then writes it into the checkout, the one place it is
+# allowed to, and the step finishes with an untracked file that stops the run.
+# Each session gets a scratch directory of its own instead: writable without
+# approval (--add-dir), its TMPDIR (so mktemp lands there), and named in the
+# prompt. It lives under run_tmp and goes when the run ends.
+#
+# run_session <prompt> <scratch-dir>
 #
 # Returns claude's own exit status, not the renderer's: a jq hiccup must not be
 # reported as a failed step, and a failed step must not be hidden by a renderer
 # that exited cleanly on partial input.
 run_session() {
+  local scratch=$2
+  mkdir -p -- "$scratch" || return 1
+  local -a run=("${hide_herdr[@]}" TMPDIR="$scratch" claude -p "${session_flags[@]}" --add-dir "$scratch")
   if [ -z "$stream" ]; then
-    "${hide_herdr[@]}" claude -p "${session_flags[@]}" --effort "$effort" "$1"
+    "${run[@]}" --effort "$effort" "$1"
     return $?
   fi
 
@@ -611,8 +622,7 @@ run_session() {
   # the capture is complete the moment the pipeline returns; read_usage below
   # then never races the writer.
   : >"$stream_file"
-  "${hide_herdr[@]}" claude -p --output-format stream-json --verbose \
-    "${session_flags[@]}" --effort "$effort" "$1" |
+  "${run[@]}" --output-format stream-json --verbose --effort "$effort" "$1" |
     tee "$stream_file" |
     jq -r --unbuffered "$progress_filter"
   local rc=${PIPESTATUS[0]}
@@ -1202,7 +1212,8 @@ for ((i = 1; i <= max; i++)); do
   herdr_state working "session $i, $((total - before_open))/$total done"
 
   session_step="$before_step"
-  run_session "$prompt Stay on the current branch ($branch); do not create, switch, or merge branches, and do not open a pull request." ||
+  session_scratch="$run_tmp/session-$i"
+  run_session "$prompt Stay on the current branch ($branch); do not create, switch, or merge branches, and do not open a pull request. Your scratchpad is $session_scratch: write every file that is not part of the step's change there - issue and comment bodies, gate logs, notes - and never inside the repository. Leave no scratch file in the working tree." "$session_scratch" ||
     die "Session $i exited non-zero. $before_open step(s) still open."
 
   read_usage
