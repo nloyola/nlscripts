@@ -10,6 +10,7 @@ HAVE_XAW3D=0
 
 # Hosts that have no X server and always want a terminal-only Emacs.
 NOX_HOSTS=(
+    berlix
     opentaproject
 )
 
@@ -228,7 +229,11 @@ install_build_dependencies() {
     # Mailutils binary is used at runtime for movemail, so install it alongside headers.
     packages+=("mailutils")
 
-    sudo apt install -y "${packages[@]}"
+    # --no-install-recommends: mailutils recommends an MTA, which drags in
+    # postfix and stops the install at its interactive debconf dialog. Build
+    # dependencies never need their recommends. DEBIAN_FRONTEND is set inside
+    # sudo, which would otherwise drop it from the environment.
+    sudo DEBIAN_FRONTEND=noninteractive apt install -y --no-install-recommends "${packages[@]}"
 }
 
 version_ge() {
