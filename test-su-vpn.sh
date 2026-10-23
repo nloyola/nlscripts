@@ -29,6 +29,10 @@ check() {
   if "$@" >/dev/null 2>&1; then pass "$desc"; else fail "$desc"; fi
 }
 
+check_not() {
+  if "$@" >/dev/null 2>&1; then fail "$desc"; else pass "$desc"; fi
+}
+
 VPN_SNAT='-A POSTROUTING -s 10.123.45.0/24 ! -d 127.0.0.0/8 ! -o lo -m comment --comment su_vpn.sh-docker-vpn -j SNAT --to-source 10.240.228.7'
 
 setup_case() {
@@ -98,10 +102,20 @@ EOF
 [[ "$1" == cat && -n "${TEST_HAVE_UNIT:-}" ]]
 EOF
 
-  for cmd in tailscale dig resolvectl pkill nmcli; do
+  # tailscale reports TEST_TS_STATE as its backend state, and fails like a
+  # stopped tailscaled when that is unset.
+  cat >"$root/bin/tailscale" <<'EOF'
+#!/usr/bin/env bash
+[[ "$1 $2" == "status --json" && -n "${TEST_TS_STATE:-}" ]] || exit 1
+printf '{\n  "BackendState": "%s",\n}\n' "$TEST_TS_STATE"
+EOF
+
+  for cmd in dig resolvectl pkill nmcli; do
     printf '#!/usr/bin/env bash\nexit 1\n' >"$root/bin/$cmd"
   done
   chmod +x "$root"/bin/*
+  # A TUN link reads "unknown" while it is up.
+  echo unknown >"$root/tailscale0.operstate"
 
   export TEST_ROOT="$root"
   export PATH="$root/bin:$PATH"
@@ -109,6 +123,8 @@ EOF
   export SU_VPN_STATE_FILE="$root/state"
   export SU_VPN_LOCK_FILE="$root/lock"
   export SU_VPN_RESOLV_BACKUP="$root/resolv.backup"
+  export SU_VPN_TAILSCALE_OPERSTATE="$root/tailscale0.operstate"
+  unset TEST_TS_STATE
   export TEST_DEFAULT_ROUTE='default via 192.168.50.1 dev br0 proto dhcp src 192.168.50.3 metric 425'
   export TEST_FORTI_STATUS='Status: Not Running'
 }
@@ -154,6 +170,33 @@ dead_tunnel_leftovers
 export TEST_FORTI_STATUS='Status: Connected'
 "$script" check >/dev/null 2>&1
 desc='check leaves a live tunnel alone'; check has_vpn_snat
+
+restarted_tailscaled() { grep -qxF 'sudo systemctl restart tailscaled' "$TEST_ROOT/calls"; }
+
+# What the box looked like on 2026-10-23: the tunnel up and tailscaled Running,
+# but tailscale0 down with no address, so tailnet names did not resolve.
+setup_case check-live-tailscale-down
+dead_tunnel_leftovers
+export TEST_FORTI_STATUS='Status: Connected' TEST_TS_STATE=Running
+echo down >"$SU_VPN_TAILSCALE_OPERSTATE"
+"$script" check >/dev/null 2>&1
+rc=$?
+desc='check with a live tunnel restarts tailscaled when tailscale0 is down'; check restarted_tailscaled
+desc='check still exits 0 after reviving tailscale0'; check test "$rc" = 0
+desc='check reviving tailscale0 leaves the tunnel alone'; check has_vpn_snat
+
+setup_case check-live-tailscale-up
+dead_tunnel_leftovers
+export TEST_FORTI_STATUS='Status: Connected' TEST_TS_STATE=Running
+"$script" check >/dev/null 2>&1
+desc='check leaves a healthy tailscaled alone'; check_not restarted_tailscaled
+
+setup_case check-live-tailscale-stopped
+dead_tunnel_leftovers
+export TEST_FORTI_STATUS='Status: Connected' TEST_TS_STATE=Stopped
+echo down >"$SU_VPN_TAILSCALE_OPERSTATE"
+"$script" check >/dev/null 2>&1
+desc='check does not start a tailscaled the user stopped'; check_not restarted_tailscaled
 
 setup_case check-unknown
 dead_tunnel_leftovers
@@ -222,6 +265,13 @@ desc='disconnect without a state file has NetworkManager put back its routes'
 check grep -qxF 'sudo nmcli device reapply br0' "$TEST_ROOT/calls"
 desc="disconnect without a state file has NetworkManager put back its DNS"
 check grep -qxF 'sudo nmcli general reload dns-full' "$TEST_ROOT/calls"
+
+setup_case disconnect-tailscale-down
+printf 'GATEWAY=192.168.50.1\nDEVICE=br0\nVPN_SOURCE=10.240.228.5\n' >"$SU_VPN_STATE_FILE"
+export TEST_TS_STATE=Running
+echo down >"$SU_VPN_TAILSCALE_OPERSTATE"
+"$script" disconnect >/dev/null 2>&1
+desc='disconnect restarts tailscaled when tailscale0 is down'; check restarted_tailscaled
 
 setup_case disconnect-normal
 printf 'GATEWAY=192.168.50.1\nDEVICE=br0\nVPN_SOURCE=10.240.228.5\n' >"$SU_VPN_STATE_FILE"

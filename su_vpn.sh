@@ -21,6 +21,7 @@ STATE_FILE="${SU_VPN_STATE_FILE:-/tmp/su_vpn.sh.state}"
 LOCK_FILE="${SU_VPN_LOCK_FILE:-/tmp/su_vpn.sh.lock}"
 RESOLV_BACKUP="${SU_VPN_RESOLV_BACKUP:-/tmp/su_vpn.sh.resolv.conf}"
 FORTIVPN="${FORTIVPN:-/opt/forticlient/fortivpn}"
+TAILSCALE_OPERSTATE="${SU_VPN_TAILSCALE_OPERSTATE:-/sys/class/net/tailscale0/operstate}"
 WATCHER_UNIT="su-vpn-docker-nat.service"
 # refresh-docker and check exit with this when there is no VPN session to look
 # after, so the watcher knows to stop.
@@ -275,6 +276,33 @@ resolv_conf_dns_broken() {
   resolves_external_via "$reference"
 }
 
+tailscale_running() {
+  # True when Tailscale is meant to be up, so nothing here overrides the user's
+  # prefs. `|| true`: tailscale status fails while tailscaled is stopped, and
+  # under pipefail that would abort the teardown before it removes the state
+  # file.
+  command -v tailscale >/dev/null 2>&1 || return 1
+  local state
+  state="$(tailscale status --json 2>/dev/null | awk -F'"' '/"BackendState"/ {print $4; exit}' || true)"
+  [[ "$state" == "Running" ]]
+}
+
+revive_tailscale_tun() {
+  # Our default-route churn during connect, and FortiClient while the tunnel is
+  # up, can leave tailscale0 administratively down with no address. tailscaled
+  # still reports Running and `tailscale ping` still answers over UDP, but there
+  # are no tailnet routes and no MagicDNS, so `ssh <tailnet host>` fails with
+  # "Could not resolve hostname" (2026-10-23, with the tunnel up). A plain
+  # `tailscale up` will not recreate a downed TUN link; only a daemon restart
+  # reliably brings tailscale0 back and reinstalls routes + DNS. Returns 0 only
+  # if it restarted the daemon.
+  local op
+  op="$(cat "$TAILSCALE_OPERSTATE" 2>/dev/null || echo down)"
+  [[ "$op" == "down" ]] || return 1
+  echo "su_vpn.sh: tailscale0 is down; restarting tailscaled." >&2
+  sudo systemctl restart tailscaled 2>/dev/null || true
+}
+
 reassert_tailscale() {
   # Our default-route churn during connect (delete default, reconnect) can race
   # tailscaled and leave tailscale0 down with no tailnet routes and MagicDNS
@@ -282,19 +310,10 @@ reassert_tailscale() {
   # daemon forwarding to the VPN's now-unreachable resolvers. Called from
   # restore_routes so every teardown leaves Tailscale intact. Respects the
   # user's prefs: only acts when Tailscale is meant to be running.
-  command -v tailscale >/dev/null 2>&1 || return 0
-  local state
-  # `|| true`: tailscale status fails while tailscaled is stopped, and under
-  # pipefail that would abort the teardown before it removes the state file.
-  state="$(tailscale status --json 2>/dev/null | awk -F'"' '/"BackendState"/ {print $4; exit}' || true)"
-  [[ "$state" == "Running" ]] || return 0
+  tailscale_running || return 0
 
-  local op
-  op="$(cat /sys/class/net/tailscale0/operstate 2>/dev/null || echo down)"
-  if [[ "$op" == "down" ]]; then
-    # A plain `tailscale up` will not recreate a downed TUN link; only a daemon
-    # restart reliably brings tailscale0 back and reinstalls routes + DNS.
-    sudo systemctl restart tailscaled 2>/dev/null || true
+  if revive_tailscale_tun; then
+    :
   elif [[ ! -L /etc/resolv.conf ]] \
        && tailscale dns status 2>/dev/null | grep -q "Tailscale DNS: enabled" \
        && ! grep -q '^nameserver 100\.100\.100\.100' /etc/resolv.conf 2>/dev/null; then
@@ -493,6 +512,7 @@ case "$ACTION" in
     # expect script below can stay single-quoted and share the constant above.
     # `9>&-`: the FortiClient daemon this spawns outlives the script, and an
     # inherited lock descriptor would hold the lock for the life of the tunnel.
+    # shellcheck disable=SC2016 # $env(...) is expect's, not the shell's
     VPN_PASS_ENTRY="$VPN_PASS_ENTRY" FORTIVPN="$FORTIVPN" expect -c '
       set timeout 60
       log_user 1
@@ -519,6 +539,7 @@ case "$ACTION" in
       # Re-pin Docker routes and SNAT container traffic to the VPN source address.
       pin_docker_routes
       configure_docker_vpn_nat
+      if tailscale_running; then revive_tailscale_tun || true; fi
       start_watcher
       echo "su_vpn.sh: VPN connected. Run 'su_vpn.sh disconnect' to tear down and restore routes."
     else
@@ -567,14 +588,22 @@ case "$ACTION" in
     ;;
   check)
     # Tear down if the tunnel has died. A dying tunnel raises no Docker event,
-    # so the watcher also calls this on a timer. Exits NO_SESSION once there is
-    # no session left: none to begin with, or this call just tore it down.
+    # so the watcher also calls this on a timer. While the tunnel is up, bring
+    # back a tailscale0 that went down mid-session. Exits NO_SESSION once there
+    # is no session left: none to begin with, or this call just tore it down.
     [[ -f "$STATE_FILE" ]] || exit "$NO_SESSION"
     try_lock || exit 0
     [[ -f "$STATE_FILE" ]] || exit "$NO_SESSION"
-    [[ "$(tunnel_status)" == down ]] || exit 0
-    reap_dead_tunnel
-    exit "$NO_SESSION"
+    case "$(tunnel_status)" in
+      up)
+        if tailscale_running; then revive_tailscale_tun || true; fi
+        ;;
+      down)
+        reap_dead_tunnel
+        exit "$NO_SESSION"
+        ;;
+      *) ;;
+    esac
     ;;
   *)
     echo "Usage: $0 {connect|disconnect|restore|refresh-docker|check}" >&2
