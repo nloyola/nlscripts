@@ -11,6 +11,7 @@ HAVE_XAW3D=0
 # Hosts that have no X server and always want a terminal-only Emacs.
 NOX_HOSTS=(
     berlix
+    ms-ubuntu-1
     opentaproject
 )
 
