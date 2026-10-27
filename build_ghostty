@@ -25,6 +25,7 @@ install_build_dependencies() {
         xz-utils \
         libgtk-4-dev \
         libadwaita-1-dev \
+        libfontconfig-dev \
         gettext \
         pkg-config \
         patchelf
@@ -237,8 +238,15 @@ patch_glslang_doc
 # The sudo is just write access to /usr/local, nothing more. A tarball has no
 # git metadata, so the version has to be given or ghostty calls itself
 # X.Y.Z-dev+0000000.
+#
+# -fsys=fontconfig links the system fontconfig instead of the vendored one.
+# GTK and Pango load the system library anyway, and with 1.4.0's vendored
+# 2.18.3 statically linked beside trixie's 2.15.0, ghostty's own lookups found
+# no fonts at all: +list-fonts was empty and every window died with
+# FontconfigNoMatch.
 echo ">>> Building and installing to /usr/local (needs sudo)..."
-sudo "$ZIG" build -p /usr/local -Doptimize=ReleaseFast -Dversion-string="$VERSION"
+sudo "$ZIG" build -p /usr/local -Doptimize=ReleaseFast \
+    -Dversion-string="$VERSION" -fsys=fontconfig
 
 # Point the binary at the system dynamic loader.
 #
