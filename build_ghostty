@@ -1,8 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Builds a tagged release from its source tarball, not a git checkout of main.
+# A tarball ships its GTK .ui files precompiled, so it does not need the
+# blueprint-compiler that main does (main wants >= 0.20, trixie has 0.16), and
+# a release is what we want to run anyway.
+#
+#   build_ghostty            latest release tag
+#   build_ghostty 1.4.0      a specific release
 DEST=$HOME/src/github/desktop/ghostty
 REPO=https://github.com/ghostty-org/ghostty
+RELEASES=https://release.files.ghostty.org
+# Ghostty's release signing key, from https://ghostty.org/docs/install/build.
+MINISIGN_PUBKEY=RWQlAjJC23149WL2sEpT/l0QKy7hMIFhYdQOFy0Z7z7PbneUgvlsnYcV
 
 install_build_dependencies() {
     echo ">>> Updating apt package metadata..."
@@ -15,7 +25,6 @@ install_build_dependencies() {
         xz-utils \
         libgtk-4-dev \
         libadwaita-1-dev \
-        blueprint-compiler \
         gettext \
         pkg-config \
         patchelf
@@ -79,7 +88,7 @@ patch_gtk_css() {
     # and every launch logs four theme parser errors. Dropping the hint keeps
     # the gradient and satisfies GTK.
     #
-    # The rotation re-clones on every build, so this has to be reapplied each
+    # Every build unpacks a fresh tree, so this has to be reapplied each
     # time. Upstream is src/apprt/gtk/css/style.css, the four
     # .drop-overlay.drop-* rules; when upstream fixes it the count check below
     # stops matching and this turns into a no-op with a warning.
@@ -102,6 +111,65 @@ patch_gtk_css() {
     echo ">>> Removed ${found} CSS interpolation hint(s) from style.css."
 }
 
+latest_version() {
+    # Newest vX.Y.Z tag, without the v. The "tip" nightly is a release on
+    # GitHub but not a tag of this shape, so it never matches.
+    git ls-remote --tags --refs --sort=-v:refname "$REPO" 'v*' \
+        | sed -nE 's|.*refs/tags/v([0-9]+\.[0-9]+\.[0-9]+)$|\1|p' \
+        | head -n1
+}
+
+fetch_release() {
+    # Download the release tarball and its signature, verify, and unpack it
+    # into $DEST.
+    local version="$1"
+    local tarball="ghostty-${version}.tar.gz"
+    local tmp
+    tmp=$(mktemp -d)
+
+    echo ">>> Downloading ${tarball}..."
+    curl -fsSL -o "${tmp}/${tarball}" "${RELEASES}/${version}/${tarball}"
+    curl -fsSL -o "${tmp}/${tarball}.minisig" "${RELEASES}/${version}/${tarball}.minisig"
+
+    if ! command -v minisign >/dev/null; then
+        echo "ERROR: minisign not found on PATH; cannot verify ${tarball}." >&2
+        echo "       It comes from nix/hosts/\$(hostname -s).nix in home_config." >&2
+        exit 1
+    fi
+    minisign -Vm "${tmp}/${tarball}" -P "$MINISIGN_PUBKEY"
+
+    mkdir -p "$DEST"
+    tar -xzf "${tmp}/${tarball}" -C "$DEST" --strip-components=1
+    rm -rf "$tmp"
+}
+
+patch_glslang_doc() {
+    # Zig 0.17's clang needs more than 10 GB to optimise glslang's
+    # SPIRV/doc.cpp at any level above -O0 (measured 2026-10-27 under a 6 GB
+    # cgroup: -O1, -O2 and -O3 all hit the limit; -O0 peaks at 181 MB).
+    # asterix has 16 GB, so earlyoom kills the compile part way through and
+    # the build fails with "clang terminated with signal TERM". The file is
+    # only name tables for the SPIR-V disassembler, so building it unoptimised
+    # costs nothing that matters.
+    #
+    # -fsys=glslang would skip the vendored copy entirely, but in 1.4.0 it does
+    # not: pkg/glslang/build.zig links the vendored library into its
+    # translate_c module unconditionally, so it is compiled either way.
+    #
+    # The file lives in the fetched package under zig-pkg, so dependencies are
+    # fetched first and patched in place. zig checks the package hash only when
+    # fetching, so the edit survives into the build.
+    local doc
+    doc=$(find "${DEST}/zig-pkg" -path '*/SPIRV/doc.cpp' -print -quit)
+    if [[ -z "$doc" ]]; then
+        echo ">>> glslang SPIRV/doc.cpp not found under zig-pkg, skipping." >&2
+        echo "    If the build is killed by earlyoom, this patch is why." >&2
+        return 0
+    fi
+    sed -i '1i #pragma clang optimize off' "$doc"
+    echo ">>> Disabled optimisation for glslang SPIRV/doc.cpp."
+}
+
 reclaim_caches() {
     # zig runs under sudo below, so everything it writes into the checkout is
     # root-owned until the chown at the end of a successful run. If a previous
@@ -121,15 +189,22 @@ reclaim_caches() {
     sudo chown -R "$(id -u):$(id -g)" "${stale[@]}"
 }
 
+VERSION=${1:-$(latest_version)}
+if [[ -z "$VERSION" ]]; then
+    echo "ERROR: could not determine the latest ghostty release." >&2
+    exit 1
+fi
+echo ">>> Building ghostty ${VERSION}."
+
 install_build_dependencies
 reclaim_caches
 
-# Rotate the previous checkout aside and clone fresh. Keeping the tree and
-# fetching into it was tried on 2026-08-28 and is a trap here: zig's cache
+# Rotate the previous tree aside and unpack fresh. Keeping the tree and
+# updating it in place was tried on 2026-08-28 and is a trap here: zig's cache
 # records which libc it resolved when it was populated, a cache from an earlier
 # environment gets reused silently, and zig's install step then skips the
 # byte-identical result. The build reports success while /usr/local keeps the
-# old binary. A fresh clone is cold by construction, and <dest>.old stays
+# old binary. A fresh tree is cold by construction, and <dest>.old stays
 # around as the previous tree if a build needs comparing against it.
 #
 # reclaim_caches above is what keeps the rm below from failing: zig runs under
@@ -143,7 +218,7 @@ if [[ -d "${DEST}" ]]; then
     mv "$DEST" "${DEST}.old"
 fi
 
-git clone --depth 1 "$REPO" "$DEST"
+fetch_release "$VERSION"
 
 patch_gtk_css
 
@@ -154,9 +229,16 @@ echo ">>> Using ${ZIG}"
 
 cd "$DEST"
 
-# The sudo is just write access to /usr/local, nothing more.
+echo ">>> Fetching zig dependencies..."
+"$ZIG" build --fetch
+
+patch_glslang_doc
+
+# The sudo is just write access to /usr/local, nothing more. A tarball has no
+# git metadata, so the version has to be given or ghostty calls itself
+# X.Y.Z-dev+0000000.
 echo ">>> Building and installing to /usr/local (needs sudo)..."
-sudo "$ZIG" build -p /usr/local -Doptimize=ReleaseFast
+sudo "$ZIG" build -p /usr/local -Doptimize=ReleaseFast -Dversion-string="$VERSION"
 
 # Point the binary at the system dynamic loader.
 #
@@ -219,4 +301,9 @@ if ! /usr/local/bin/ghostty --version >/dev/null 2>&1; then
     exit 1
 fi
 
-echo ">>> Installed $(/usr/local/bin/ghostty --version | head -n1)"
+installed=$(/usr/local/bin/ghostty --version | head -n1)
+if [[ "$installed" != "Ghostty ${VERSION}" ]]; then
+    echo "ERROR: expected Ghostty ${VERSION}, /usr/local/bin/ghostty reports: ${installed}" >&2
+    exit 1
+fi
+echo ">>> Installed ${installed}"
