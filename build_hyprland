@@ -1,0 +1,300 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Build Hyprland from source into its own prefix (/opt/hyprland) and offer it as
+# a second gdm session, beside the Debian package rather than over it.
+#
+# WHY: asterix runs Hyprland 0.55.2 from trixie-backports, and on 0.55.2 a
+# window group on a monitor that replugs - the Philips on DP-1 drops hot-plug
+# every time it wakes from standby - comes back half broken: both members
+# mapped, neither hidden, and the one in front never gets another frame
+# callback, so a GTK4 window (ghostty) stops drawing and stops taking input.
+# 0.56.0 fixes group/monitor desync (#14478), a crash on group dissolution
+# (#15135) and skipped frame scheduling (#15404). Backports cannot follow:
+# 0.56 needs Lua 5.5 and libinput >= 1.29, neither of which Debian has.
+#
+# WHY 0.56.2 AND NOT NEWER: 0.57.0 removed hyprlang config support outright
+# (#15539, "remove legacy config support") and reads only Lua. Every file under
+# user/.config/hypr is hyprlang, and it is shared with gudrun, whose floor is
+# 0.53.3. 0.56.2 is the last release that reads hyprland.conf, so the version is
+# pinned and a newer one is refused - see check_version.
+#
+# WHY A SEPARATE PREFIX: three dependencies are built from source - Lua 5.5,
+# libinput and wayland-protocols - and libinput is a system library that every
+# other input stack on the machine also loads. Installed to /usr/local it would
+# be picked up by everything; under /opt/hyprland, reached through Hyprland's
+# own RPATH, only this compositor sees it. The packaged 0.55.2 stays installed
+# and selectable at the gdm login screen, so a bad build costs a logout, not
+# the desktop. Remove the whole thing with:
+#   sudo rm -rf /opt/hyprland /usr/share/wayland-sessions/hyprland-opt.desktop
+#
+# The hypr libraries (aquamarine, hyprlang, hyprutils, hyprcursor,
+# hyprgraphics) and hyprwayland-scanner come from trixie-backports: their
+# versions there already satisfy 0.56.2's minimums, and building them too would
+# put a second copy of each beside the ones the packaged 0.55.2 uses.
+#
+# Debian only. gudrun's Ubuntu Hyprland is not affected and does not need this.
+#
+# Build parallelism defaults to 4 jobs, not nproc: a full-width C++ build on
+# asterix's 16GB fills it and earlyoom starts killing the desktop. Override with
+# HL_JOBS.
+
+HYPRLAND_VERSION=${HYPRLAND_VERSION:-0.56.2}
+LIBINPUT_VERSION=1.29.2
+WAYLAND_PROTOCOLS_VERSION=1.49
+LUA_VERSION=5.5.1
+
+PREFIX=/opt/hyprland
+SRC=$HOME/src/hyprland
+JOBS=${HL_JOBS:-4}
+SESSION_FILE=/usr/share/wayland-sessions/hyprland-opt.desktop
+
+# Every dependency built here installs its .pc file under the prefix; meson
+# puts libraries in lib/ because of --libdir=lib below, and wayland-protocols
+# (data only) puts its .pc in share/.
+export PKG_CONFIG_PATH=$PREFIX/lib/pkgconfig:$PREFIX/share/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}
+
+# 0.57.0 dropped hyprlang; anything from there on cannot read this repo's
+# config. Refuse rather than install a compositor that starts with no config.
+check_version() {
+    if dpkg --compare-versions "$HYPRLAND_VERSION" ge 0.57.0; then
+        echo "ERROR: Hyprland $HYPRLAND_VERSION reads only Lua config (legacy" >&2
+        echo "       hyprlang support was removed in 0.57.0) and this repo's" >&2
+        echo "       user/.config/hypr is hyprlang. 0.56.2 is the newest usable." >&2
+        exit 1
+    fi
+}
+
+install_build_dependencies() {
+    echo ">>> Updating apt package metadata..."
+    sudo apt update
+
+    echo ">>> Installing build dependencies..."
+    sudo apt install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        cmake \
+        curl \
+        git \
+        meson \
+        ninja-build \
+        pkg-config \
+        glslang-dev \
+        libcairo2-dev \
+        libdrm-dev \
+        libegl-dev \
+        libeis-dev \
+        libgbm-dev \
+        libgles-dev \
+        libglib2.0-dev \
+        liblcms2-dev \
+        libmuparser-dev \
+        libpango1.0-dev \
+        libpixman-1-dev \
+        libre2-dev \
+        libtomlplusplus-dev \
+        libwayland-dev \
+        libxcb-composite0-dev \
+        libxcb-errors-dev \
+        libxcb-icccm4-dev \
+        libxcb-render0-dev \
+        libxcb-res0-dev \
+        libxcb-xfixes0-dev \
+        libxcursor-dev \
+        uuid-dev \
+        libevdev-dev \
+        libmtdev-dev \
+        libudev-dev \
+        libwacom-dev
+
+    # NotAutomatic, so these need an explicit target release. libxkbcommon-dev
+    # is here because 0.56.2 wants >= 1.11 and trixie proper has 1.7.
+    echo ">>> Installing the hypr libraries from trixie-backports..."
+    sudo apt install -y --no-install-recommends -t trixie-backports \
+        hyprwayland-scanner \
+        libaquamarine-dev \
+        libhyprcursor-dev \
+        libhyprgraphics-dev \
+        libhyprlang-dev \
+        libhyprutils-dev \
+        libxkbcommon-dev
+}
+
+prepare_prefix() {
+    # Owned by root like the rest of /opt, but every install step below runs
+    # under sudo, so nothing needs it writable by the user.
+    sudo install -d "$PREFIX" "$PREFIX/lib/pkgconfig"
+    mkdir -p "$SRC"
+}
+
+# Lua ships a plain Makefile and no .pc file. It is built as a static,
+# position-independent archive so Hyprland carries it inside the binary and
+# there is no liblua.so to find at runtime; the .pc written below is what
+# Hyprland's pkg_search_module(lua5.5) looks for.
+build_lua() {
+    if pkg-config --exact-version="$LUA_VERSION" lua5.5 2>/dev/null; then
+        echo ">>> Lua $LUA_VERSION already in $PREFIX."
+        return
+    fi
+    echo ">>> Building Lua $LUA_VERSION..."
+    local dir="$SRC/lua-$LUA_VERSION"
+    rm -rf "$dir"
+    curl -fsSL "https://www.lua.org/ftp/lua-$LUA_VERSION.tar.gz" | tar -xz -C "$SRC"
+    make -C "$dir" -j"$JOBS" linux MYCFLAGS=-fPIC
+    sudo make -C "$dir" install INSTALL_TOP="$PREFIX"
+    sudo tee "$PREFIX/lib/pkgconfig/lua5.5.pc" >/dev/null <<PC
+prefix=$PREFIX
+libdir=\${prefix}/lib
+includedir=\${prefix}/include
+
+Name: Lua
+Description: Lua language engine (static, for Hyprland)
+Version: $LUA_VERSION
+Libs: -L\${libdir} -llua -lm
+Cflags: -I\${includedir}
+PC
+}
+
+build_wayland_protocols() {
+    if pkg-config --exact-version="$WAYLAND_PROTOCOLS_VERSION" wayland-protocols 2>/dev/null \
+        && [[ "$(pkg-config --variable=prefix wayland-protocols)" == "$PREFIX" ]]; then
+        echo ">>> wayland-protocols $WAYLAND_PROTOCOLS_VERSION already in $PREFIX."
+        return
+    fi
+    echo ">>> Building wayland-protocols $WAYLAND_PROTOCOLS_VERSION..."
+    local dir="$SRC/wayland-protocols"
+    rm -rf "$dir"
+    git clone --depth 1 --branch "$WAYLAND_PROTOCOLS_VERSION" \
+        https://gitlab.freedesktop.org/wayland/wayland-protocols.git "$dir"
+    meson setup "$dir/build" "$dir" --prefix="$PREFIX" -Dtests=false
+    ninja -C "$dir/build"
+    sudo ninja -C "$dir/build" install
+}
+
+# udev-dir is pinned into the prefix on purpose. Left at its default, libinput
+# takes it from udev's own pkg-config - /usr/lib/udev - and `sudo ninja install`
+# would overwrite the system libinput's udev rules and hwdb entries with these.
+build_libinput() {
+    if pkg-config --exact-version="$LIBINPUT_VERSION" libinput 2>/dev/null \
+        && [[ "$(pkg-config --variable=prefix libinput)" == "$PREFIX" ]]; then
+        echo ">>> libinput $LIBINPUT_VERSION already in $PREFIX."
+        return
+    fi
+    echo ">>> Building libinput $LIBINPUT_VERSION..."
+    local dir="$SRC/libinput"
+    rm -rf "$dir"
+    git clone --depth 1 --branch "$LIBINPUT_VERSION" \
+        https://gitlab.freedesktop.org/libinput/libinput.git "$dir"
+    meson setup "$dir/build" "$dir" \
+        --prefix="$PREFIX" \
+        --libdir=lib \
+        --buildtype=release \
+        -Dudev-dir="$PREFIX/lib/udev" \
+        -Ddocumentation=false \
+        -Ddebug-gui=false \
+        -Dtests=false \
+        -Dinstall-tests=false \
+        -Dlibwacom=true
+    ninja -C "$dir/build" -j"$JOBS"
+    sudo ninja -C "$dir/build" install
+}
+
+fetch_hyprland() {
+    local dir="$SRC/Hyprland-$HYPRLAND_VERSION"
+    if [[ ! -d "$dir/.git" ]]; then
+        echo ">>> Cloning Hyprland v$HYPRLAND_VERSION..."
+        git clone --recursive --depth 1 --shallow-submodules \
+            --branch "v$HYPRLAND_VERSION" https://github.com/hyprwm/Hyprland "$dir"
+    else
+        echo ">>> Using the existing checkout in $dir."
+    fi
+}
+
+# --disable-new-dtags makes the linker write DT_RPATH instead of DT_RUNPATH.
+# The difference is load-bearing: RUNPATH only applies to the binary's own
+# direct dependencies, so aquamarine (from backports) would still resolve
+# libinput.so.10 from /usr/lib and the process would end up with whichever copy
+# the loader met first. RPATH also covers transitive lookups, so the one
+# libinput this compositor loads is the prefix's.
+build_hyprland() {
+    local dir="$SRC/Hyprland-$HYPRLAND_VERSION"
+    echo ">>> Configuring Hyprland $HYPRLAND_VERSION..."
+    cmake -GNinja -B "$dir/build" -S "$dir" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX="$PREFIX" \
+        -DCMAKE_PREFIX_PATH="$PREFIX" \
+        -DCMAKE_INSTALL_RPATH="$PREFIX/lib" \
+        -DCMAKE_EXE_LINKER_FLAGS="-Wl,--disable-new-dtags"
+
+    echo ">>> Building Hyprland with $JOBS jobs..."
+    cmake --build "$dir/build" -j"$JOBS"
+
+    echo ">>> Installing to $PREFIX (needs sudo)..."
+    sudo cmake --install "$dir/build"
+}
+
+# gdm lists /usr/share/wayland-sessions only, and the packaged hyprland.desktop
+# there points at /usr/bin/start-hyprland. This adds a second entry rather than
+# editing that one, so both versions stay selectable at login.
+#
+# The wrapper puts the prefix first on PATH before anything starts. Hyprland's
+# children inherit it, so `hyprctl` from exec-once lines and keybinds is the one
+# that matches the running compositor, not /usr/bin's 0.55.2.
+install_session() {
+    echo ">>> Installing the session wrapper and $SESSION_FILE..."
+    sudo tee "$PREFIX/bin/hyprland-session" >/dev/null <<SH
+#!/bin/sh
+# Generated by build_hyprland. Starts the /opt/hyprland build under its watchdog.
+export PATH=$PREFIX/bin:\$PATH
+exec $PREFIX/bin/start-hyprland --path $PREFIX/bin/Hyprland "\$@"
+SH
+    sudo chmod 755 "$PREFIX/bin/hyprland-session"
+
+    sudo tee "$SESSION_FILE" >/dev/null <<DESKTOP
+[Desktop Entry]
+Name=Hyprland $HYPRLAND_VERSION (source build)
+Comment=Hyprland built by build_hyprland into $PREFIX
+Exec=$PREFIX/bin/hyprland-session
+Type=Application
+DesktopNames=Hyprland
+Keywords=tiling;wayland;compositor;
+DESKTOP
+}
+
+# The checks that matter before logging in: the binary is the expected version,
+# it loads libinput from the prefix rather than /usr/lib, and it accepts this
+# repo's config. A config error would otherwise only show up as a red banner
+# after the login.
+verify() {
+    echo ">>> Installed version:"
+    "$PREFIX/bin/Hyprland" --version | head -1
+
+    # Captured first: `ldd | grep -q` under pipefail fails whenever grep exits
+    # early and ldd takes the SIGPIPE, which would report a good build as bad.
+    local libinput
+    libinput=$(ldd "$PREFIX/bin/Hyprland" | grep 'libinput\.so' || true)
+    if [[ "$libinput" != *"=> $PREFIX/lib/"* ]]; then
+        echo "ERROR: Hyprland does not load libinput from $PREFIX/lib:" >&2
+        echo "${libinput:-  (no libinput in ldd output)}" >&2
+        exit 1
+    fi
+    echo ">>> libinput resolves from $PREFIX/lib."
+
+    echo ">>> Checking ~/.config/hypr/hyprland.conf against $HYPRLAND_VERSION..."
+    "$PREFIX/bin/Hyprland" --verify-config
+}
+
+check_version
+install_build_dependencies
+prepare_prefix
+build_lua
+build_wayland_protocols
+build_libinput
+fetch_hyprland
+build_hyprland
+install_session
+verify
+
+echo
+echo ">>> Done. Log out and pick \"Hyprland $HYPRLAND_VERSION (source build)\" at"
+echo "    the gdm login screen. The packaged \"Hyprland\" entry is untouched."
