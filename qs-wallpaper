@@ -73,10 +73,12 @@
 # QS_WALLPAPER_MONITORS, QS_WALLPAPER_HYPRCTL and QS_WALLPAPER_FEHBG name files
 # to read instead of running xrandr, running hyprctl and reading ~/.fehbg (the
 # first two also force which session path is taken), QS_WALLPAPER_STATE
-# relocates the state file, and QS_WALLPAPER_DRY=1 prints the feh call instead
+# relocates the state file, QS_WALLPAPER_HYPRLOCK the lock-screen include
+# written beside it, and QS_WALLPAPER_DRY=1 prints the feh call instead
 # of making it, so the mapping and seeding can be driven from fixtures.
 
 STATE=${QS_WALLPAPER_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/qs-wallpaper}
+HYPRLOCK=${QS_WALLPAPER_HYPRLOCK:-$STATE-hyprlock.conf}
 DEFAULT_DIR=${QS_WALLPAPER_DIR:-${QS_THEME_WALLPAPER_LIB:-$HOME/wallpapers/library}}
 TAB=$(printf '\t')
 
@@ -174,6 +176,28 @@ write_state() {
     mkdir -p "$(dirname "$STATE")" || exit 1
     { echo "#mode $fit"; cat; } > "$tmp" || exit 1
     mv -- "$tmp" "$STATE"
+    write_hyprlock
+}
+
+# Render the state file as hyprlock background blocks, one per monitor, so the
+# lock screen shows the wallpaper each monitor has. hyprlock cannot read the
+# state file itself - it only takes a fixed path per monitor - and it reads
+# its config fresh on every lock, so regenerating this on every write is all
+# it takes. hyprlock.conf sources it last and keeps a screenshot background
+# under it, which is what a monitor with no line here falls back to.
+#
+# Monitor-specific blocks rather than one path: Omarchy's hyprlock has a
+# single background file, but here each monitor has its own wallpaper. The
+# blur matches Omarchy's, which keeps the password field readable over a busy
+# image. '#' starts a comment in hyprlang, and '##' is its escape.
+write_hyprlock() {
+    tmp=$HYPRLOCK.$$
+
+    awk -F "$TAB" 'NF == 2 && $1 !~ /^#/ {
+        gsub(/#/, "##", $2)
+        printf "background {\n    monitor = %s\n    path = %s\n    blur_passes = 3\n    zindex = -1\n}\n\n", $1, $2
+    }' "$STATE" > "$tmp" || exit 1
+    mv -- "$tmp" "$HYPRLOCK"
 }
 
 # Write the state file back with <output> set to <file>, keeping every other
