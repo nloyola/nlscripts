@@ -1,0 +1,209 @@
+#!/bin/sh
+# Bring every home_config host to the current checkout and apply Home Manager.
+#
+#   update-all-hosts [--host NAME]... [--off-lan] [-- <command>]
+#       Run <command> on every host in home_config's nix/hosts/, all at once,
+#       and finish with one line per host: ok, failed or unreachable, and why.
+#       The default command is
+#           cd ~/home_config && git pull && hm-switch && hm-switch --gc
+#       --host limits the run to the named hosts (repeatable). --off-lan
+#       reaches berlix through its tailnet alias instead of the LAN one.
+#
+# Exit 0 every host ok, 1 a host failed, 2 a host could not be reached. As in
+# omarchy-update, not knowing outranks a known failure: a run with a host
+# unreached has not answered "is everything up to date?".
+#
+# THERE IS NO REMOTE DEPLOY. Each host pulls and switches itself, so this is
+# ssh plus bookkeeping. The host you run it on is run directly rather than over
+# ssh; it is recognised by `$USER@$(uname -n)`, the same identity hm-switch
+# resolves its flake attribute from (nix/hm-switch.nix). A VPS hostname is
+# whatever the provider assigned, so that table is repeated below - add a row
+# to both when a host is added.
+#
+# THE HOST LIST IS nix/hosts/, not this file: one host per *.nix there. Only
+# hosts whose ssh alias differs from the file name need an entry in alias().
+#
+# THE COMMAND GOES OVER STDIN to `bash -l -s`, not as an argument to `bash
+# -lc`. A login shell is needed because hm-switch lives in ~/.nix-profile/bin,
+# which a non-interactive ssh PATH lacks; stdin is used because it needs no
+# quoting, so a custom command containing quotes reaches the host intact. The
+# PATH export is there for the local host, where the login shell resets PATH
+# and `nix` itself lives in the default profile.
+#
+# NOTHING IS REPAIRED. A dirty tree, an unknown host key or a file hm-switch
+# would clobber is reported with a hint and left alone; stashing, trusting a
+# key or `hm-switch -b backup` are decisions for whoever is running this.
+#
+# Each host's full output is kept in its own log, under
+# ${XDG_STATE_HOME:-~/.local/state}/update-all-hosts/<timestamp>/, and
+# `latest` beside it points at the newest run.
+#
+# UPDATE_ALL_HOSTS_REPO relocates the home_config checkout,
+# UPDATE_ALL_HOSTS_LOGS the log root, UPDATE_ALL_HOSTS_SSH the ssh binary,
+# UPDATE_ALL_HOSTS_SHELL the local shell and UPDATE_ALL_HOSTS_IDENTITY the
+# local `$USER@$(uname -n)`. They exist for the test suite,
+# scripts/tests/update-all-hosts-test.sh in home_config.
+
+set -u
+
+REPO=${UPDATE_ALL_HOSTS_REPO:-$HOME/home_config}
+LOGS=${UPDATE_ALL_HOSTS_LOGS:-${XDG_STATE_HOME:-$HOME/.local/state}/update-all-hosts}
+SSH=${UPDATE_ALL_HOSTS_SSH:-ssh}
+LOCAL_SHELL=${UPDATE_ALL_HOSTS_SHELL:-bash}
+IDENTITY=${UPDATE_ALL_HOSTS_IDENTITY:-${USER:-$(id -un)}@$(uname -n)}
+
+DEFAULT_COMMAND='cd ~/home_config && git pull && hm-switch && hm-switch --gc'
+
+usage() {
+    echo "usage: update-all-hosts [--host NAME]... [--off-lan] [-- <command>]" >&2
+    exit 2
+}
+
+die() { echo "update-all-hosts: $*" >&2; exit 2; }
+
+off_lan=0
+only=
+command=$DEFAULT_COMMAND
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --host) [ $# -ge 2 ] || usage; only="$only $2"; shift ;;
+        --host=*) only="$only ${1#--host=}" ;;
+        --off-lan) off_lan=1 ;;
+        -h|--help) usage ;;
+        --) shift; [ $# -gt 0 ] || usage; command=$*; break ;;
+        *) usage ;;
+    esac
+    shift
+done
+
+# The ssh alias for a nix/hosts/ name, where the two differ.
+alias_for() {
+    case "$1" in
+        openta) echo openta-vps ;;
+        berlix) if [ "$off_lan" -eq 1 ]; then echo berlix-ts; else echo berlix; fi ;;
+        *) echo "$1" ;;
+    esac
+}
+
+# The nix/hosts/ name of the machine this runs on, or nothing. Mirrors hostMap
+# in nix/hm-switch.nix.
+local_host() {
+    case "$IDENTITY" in
+        nelson@asterix)        echo asterix ;;
+        nelson@berlix)         echo berlix ;;
+        nelson@gudrun)         echo gudrun ;;
+        nelson@gudrun-wsl)     echo gudrun-wsl ;;
+        nloyola@opentaproject) echo openta ;;
+        nloyola@ms-ubuntu-1)   echo stellan-vps ;;
+        nloyola@srv899874)     echo replica-vps ;;
+        tikitak@srv985437)     echo tikitak-vps ;;
+    esac
+}
+
+[ -d "$REPO/nix/hosts" ] || die "no host list at $REPO/nix/hosts"
+
+hosts=
+for f in "$REPO"/nix/hosts/*.nix; do
+    [ -e "$f" ] || continue
+    hosts="$hosts $(basename "$f" .nix)"
+done
+[ -n "$hosts" ] || die "no hosts in $REPO/nix/hosts"
+
+if [ -n "$only" ]; then
+    for h in $only; do
+        case " $hosts " in
+            *" $h "*) ;;
+            *) die "unknown host '$h' (known:$hosts)" ;;
+        esac
+    done
+    hosts=$only
+fi
+
+run=$LOGS/$(date +%Y%m%d-%H%M%S)
+mkdir -p "$run" || die "cannot create $run"
+ln -sfn "$(basename "$run")" "$LOGS/latest"
+
+me=$(local_host)
+# One brace group, so bash has parsed all of it before anything runs. Then the
+# exec takes stdin away from the command, which would otherwise be reading the
+# rest of this script.
+script="{ exec </dev/null
+export PATH=\"\$HOME/.nix-profile/bin:/nix/var/nix/profiles/default/bin:\$PATH\"
+$command
+}"
+
+# The reason a log ended badly, as one line. Recognised failures get the
+# hint for what to do about them; anything else gets the log's last line.
+reason() {  # reason <log>
+    if grep -q 'Host key verification failed' "$1"; then
+        echo "host key verification failed - check the key yourself; known_hosts is not touched"
+    elif grep -q 'Permission denied (' "$1"; then
+        echo "ssh authentication refused"
+    elif grep -q 'Your local changes to the following files would be overwritten' "$1" ||
+         grep -q 'untracked working tree files would be overwritten' "$1"; then
+        echo "git pull: dirty working tree - nothing stashed"
+    elif grep -qi 'divergent branches\|Not possible to fast-forward' "$1"; then
+        echo "git pull: branch has diverged from its upstream - nothing reset"
+    elif grep -q 'would be clobbered\|is in the way of' "$1"; then
+        echo "hm-switch: existing file in the way - rerun with 'hm-switch -b backup' if that is wanted"
+    else
+        last=$(grep -v '^[[:space:]]*$' "$1" | tail -n 1)
+        echo "${last:-no output}"
+    fi
+}
+
+# Run one host to completion and leave its verdict in <host>.status:
+# "ok", "failed <reason>" or "unreachable <reason>".
+update() {  # update <host>
+    h=$1
+    log=$run/$h.log
+    if [ "$h" = "$me" ]; then
+        printf '%s\n' "$script" | "$LOCAL_SHELL" -l -s >"$log" 2>&1
+        rc=$?
+    else
+        printf '%s\n' "$script" | "$SSH" -o BatchMode=yes -o ConnectTimeout=15 \
+            -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
+            "$(alias_for "$h")" 'bash -l -s' >"$log" 2>&1
+        rc=$?
+    fi
+
+    if [ "$rc" -eq 0 ]; then
+        verdict=ok
+    elif [ "$h" != "$me" ] && [ "$rc" -eq 255 ] &&
+         ! grep -q 'Host key verification failed\|Permission denied (' "$log"; then
+        # 255 is ssh's own failure, as opposed to the remote command's.
+        verdict="unreachable $(reason "$log")"
+    else
+        verdict="failed $(reason "$log")"
+    fi
+    echo "$verdict" >"$run/$h.status"
+    echo "  $h: ${verdict%% *}"
+}
+
+echo "updating:$hosts"
+[ -n "$me" ] && case " $hosts " in *" $me "*) echo "($me is this machine, run locally)" ;; esac
+for h in $hosts; do
+    update "$h" &
+done
+wait
+
+echo
+status=0
+for h in $hosts; do
+    verdict=$(cat "$run/$h.status" 2>/dev/null || echo "failed no verdict recorded")
+    word=${verdict%% *}
+    why=
+    [ "$word" = "$verdict" ] || why=${verdict#* }
+    if [ -n "$why" ]; then
+        printf '%-12s %-12s %s\n' "$h" "$word" "$why"
+    else
+        printf '%-12s %s\n' "$h" "$word"
+    fi
+    case "$word" in
+        unreachable) status=2 ;;
+        failed) [ "$status" -eq 2 ] || status=1 ;;
+    esac
+done
+echo
+echo "logs: $run"
+exit "$status"
