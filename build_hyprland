@@ -155,6 +155,15 @@ Cflags: -I\${includedir}
 PC
 }
 
+# Installed as data only - the protocol XML and the .pc file - with the
+# generated enum headers skipped. 1.49's XML uses the `frozen` interface
+# attribute, which trixie's wayland-scanner 1.23 does not know, and the headers
+# are generated with `--strict`, so the build fails on the first one. 1.49
+# still declares scanner >= 1.22.90, so meson does not catch this up front.
+# Hyprland reads only the XML (pkgdatadir) and runs it through
+# hyprwayland-scanner, so the headers are not missed. Hiding pkg-config is what
+# makes the scanner dependency, which is optional with tests off, come up not
+# found; nofallback stops meson reaching for a wayland subproject instead.
 build_wayland_protocols() {
     if pkg-config --exact-version="$WAYLAND_PROTOCOLS_VERSION" wayland-protocols 2>/dev/null \
         && [[ "$(pkg-config --variable=prefix wayland-protocols)" == "$PREFIX" ]]; then
@@ -166,7 +175,10 @@ build_wayland_protocols() {
     rm -rf "$dir"
     git clone --depth 1 --branch "$WAYLAND_PROTOCOLS_VERSION" \
         https://gitlab.freedesktop.org/wayland/wayland-protocols.git "$dir"
-    meson setup "$dir/build" "$dir" --prefix="$PREFIX" -Dtests=false
+    PKG_CONFIG_LIBDIR=/nonexistent PKG_CONFIG_PATH='' meson setup "$dir/build" "$dir" \
+        --prefix="$PREFIX" \
+        --wrap-mode=nofallback \
+        -Dtests=false
     ninja -C "$dir/build"
     sudo ninja -C "$dir/build" install
 }
