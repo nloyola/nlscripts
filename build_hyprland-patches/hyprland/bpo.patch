@@ -1,0 +1,21 @@
+Subject: Fix FTBFS on trixie's GCC 14 around operator+(string, string_view)
+
+The same change Debian carries as bpo.patch in its trixie backport of
+hyprland 0.55.2 (0.55.2+ds-1~bpo13+1). Debian has no backport of 0.56.2,
+so it is restated here against 0.56.2.
+
+Forwarded: not-needed
+---
+diff --git a/src/config/shared/parserUtils/ParserUtils.cpp b/src/config/shared/parserUtils/ParserUtils.cpp
+index dec0bb2..560d6b9 100644
+--- a/src/config/shared/parserUtils/ParserUtils.cpp
++++ b/src/config/shared/parserUtils/ParserUtils.cpp
+@@ -14,7 +14,7 @@ using namespace Config::ParserUtils;
+ using namespace Hyprutils::String;
+ 
+ static std::expected<uint64_t, std::string> parseHex(std::string_view value) {
+-    auto res = value.starts_with("0x") ? strToNumber<uint64_t>(value) : strToNumber<uint64_t>(std::string{"0x"} + value);
++    auto res = value.starts_with("0x") ? strToNumber<uint64_t>(value) : strToNumber<uint64_t>(std::string{"0x"} + std::string{value});
+     if (!res)
+         return std::unexpected(std::format("invalid hex \"{}\"", value));
+     return *res;

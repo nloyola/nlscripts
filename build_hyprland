@@ -10,14 +10,14 @@ set -euo pipefail
 # mapped, neither hidden, and the one in front never gets another frame
 # callback, so a GTK4 window (ghostty) stops drawing and stops taking input.
 # 0.56.0 fixes group/monitor desync (#14478), a crash on group dissolution
-# (#15135) and skipped frame scheduling (#15404). Backports cannot follow:
-# 0.56 needs Lua 5.5 and libinput >= 1.29, neither of which Debian has.
+# (#15135) and skipped frame scheduling (#15404). Debian unstable has 0.56.2,
+# but trixie-backports cannot follow until it has Lua 5.5 and libinput >= 1.29.
 #
 # WHY 0.56.2 AND NOT NEWER: 0.57.0 removed hyprlang config support outright
 # (#15539, "remove legacy config support") and reads only Lua. Every file under
 # user/.config/hypr is hyprlang, and it is shared with gudrun, whose floor is
 # 0.53.3. 0.56.2 is the last release that reads hyprland.conf, so the version is
-# pinned and a newer one is refused - see check_version.
+# fixed, together with the commit it must resolve to and the patches below.
 #
 # WHY A SEPARATE PREFIX: three dependencies are built from source - Lua 5.5,
 # libinput and wayland-protocols - and libinput is a system library that every
@@ -28,10 +28,47 @@ set -euo pipefail
 # the desktop. Remove the whole thing with:
 #   sudo rm -rf /opt/hyprland /usr/share/wayland-sessions/hyprland-opt.desktop
 #
-# The hypr libraries (aquamarine, hyprlang, hyprutils, hyprcursor,
-# hyprgraphics) and hyprwayland-scanner come from trixie-backports: their
-# versions there already satisfy 0.56.2's minimums, and building them too would
-# put a second copy of each beside the ones the packaged 0.55.2 uses.
+# ONE HYPRUTILS: 0.56.2 needs hyprutils >= 0.14 (libhyprutils.so.13, from
+# trixie-backports), but backports built its aquamarine and hyprwire against
+# .so.12 and its hyprlang and hyprgraphics against .so.10. Linked as packaged,
+# the compositor would load all three, and Hyprland hands hyprutils smart
+# pointers and signals to aquamarine on every frame - two copies of a type that
+# changed between releases is a crash waiting for the right call. So those four
+# are built here too, at their latest releases (the same versions backports
+# ships, upstream's own 0.56.2 pins being untagged commits), against the one
+# hyprutils. They keep their sonames, and Hyprland's RPATH makes the prefix's
+# copies win for every library in the process, the backports hyprcursor's
+# hyprlang included. hyprutils, hyprcursor (which uses no hyprutils) and
+# hyprwayland-scanner still come from trixie-backports.
+#
+# GCC 14: 0.56 is written against GCC 15 (C++26 `#embed`, string + string_view,
+# insert_range), and trixie has no GCC 15; hyprwire 0.3.1 likewise
+# (append_range). build_hyprland-patches/<project>/ holds what fixes it, applied
+# to that project after it is cloned:
+#   hyprland/ - the patches Debian applies to its own 0.56.2, copied unchanged
+#     from hyprland 0.56.2+ds-3 so their provenance headers survive, plus
+#     bpo.patch: Debian's trixie-backport fix for 0.55.2, restated against
+#     0.56.2 because no 0.56.2 backport exists to copy it from.
+#   hyprwire/ - Debian's trixie-backport patches for 0.3.1 (0.3.1-3~bpo13+1),
+#     unchanged: the GCC 14 fix and upstream PR #27, which the hyprwire on
+#     this machine already carries.
+# Drop them once Debian's default GCC is 15.
+#
+# SUPPLY CHAIN: every download is pinned. Lua's tarball is checked against the
+# SHA-256 lua.org publishes, and every git clone must land on a known commit or
+# the build stops - a tag can be moved, a commit hash cannot. Hyprland's
+# submodules are pinned by its own commit. glaze, which CMake would otherwise
+# fetch by tag while configuring, is cloned here and handed to CMake, and
+# FetchContent is told it may not touch the network at all.
+#
+# HARDENING: everything is compiled with the flags Debian builds its own
+# packages with (dpkg-buildflags, hardening=+all): stack protector, fortify,
+# stack-clash and CET protection, full RELRO and BIND_NOW. A bare CMake or meson
+# build gets PIE and none of the rest. verify() checks the result.
+#
+# Every run starts from fresh clones and an empty build directory, so a rerun
+# always produces what this file describes rather than reusing a tree built
+# with older flags or pins.
 #
 # Debian only. gudrun's Ubuntu Hyprland is not affected and does not need this.
 #
@@ -39,28 +76,71 @@ set -euo pipefail
 # asterix's 16GB fills it and earlyoom starts killing the desktop. Override with
 # HL_JOBS.
 
-HYPRLAND_VERSION=${HYPRLAND_VERSION:-0.56.2}
+HYPRLAND_VERSION=0.56.2
+HYPRLAND_COMMIT=efb50993780079460b0cbed1363e2166a2de1d9f
 LIBINPUT_VERSION=1.29.2
+LIBINPUT_COMMIT=917783150a5bab7d55eedc5714f1b49b192426ac
 WAYLAND_PROTOCOLS_VERSION=1.49
+WAYLAND_PROTOCOLS_COMMIT=ee78491a237eaff9389a0ccf8680521d074407d3
+# The hypr libraries; see ONE HYPRUTILS above. Each entry is the name, the
+# release tag and the commit that tag must resolve to.
+HYPR_LIBS=(
+    hyprlang:0.6.8:3a1c1b25b059dae2c6bbc46991562ba1158d125c
+    hyprgraphics:0.5.1:482d4b7ec36ffdaf3573086aa586b178fd5404be
+    hyprwire:0.3.1:3e6865ce5fd9237b58f5b2ce5de18814df3baff5
+    aquamarine:0.15.1:f31c47a1b9d300847d8fc3108ad959448103dfc1
+)
+# The glaze 0.56.2 asks for (7.x). Debian's backports glaze is 8.x.
+GLAZE_VERSION=7.2.0
+GLAZE_COMMIT=b518eec7a22e56ffa238b072c07f47efa7cea97f
 LUA_VERSION=5.5.1
+# Published at https://www.lua.org/ftp/ beside the tarball.
+LUA_SHA256=1c4b4068d67061f2a2231ad2b5422e77acea1487ea9890f6320af614f4373dce
 
 PREFIX=/opt/hyprland
 SRC=$HOME/src/hyprland
 JOBS=${HL_JOBS:-4}
 SESSION_FILE=/usr/share/wayland-sessions/hyprland-opt.desktop
+# Resolved through the ~/.local/bin symlink to the repo, where the patches are.
+PATCH_DIR=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/build_hyprland-patches
 
 # Every dependency built here installs its .pc file under the prefix; meson
-# puts libraries in lib/ because of --libdir=lib below, and wayland-protocols
-# (data only) puts its .pc in share/.
+# and CMake put libraries in lib/ because of the libdir options below, and
+# wayland-protocols (data only) puts its .pc in share/. The prefix's bin/ goes
+# first on PATH so hyprctl's build runs the hyprwire-scanner built here.
 export PKG_CONFIG_PATH=$PREFIX/lib/pkgconfig:$PREFIX/share/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}
+export PATH=$PREFIX/bin:$PATH
 
-# 0.57.0 dropped hyprlang; anything from there on cannot read this repo's
-# config. Refuse rather than install a compositor that starts with no config.
-check_version() {
-    if dpkg --compare-versions "$HYPRLAND_VERSION" ge 0.57.0; then
-        echo "ERROR: Hyprland $HYPRLAND_VERSION reads only Lua config (legacy" >&2
-        echo "       hyprlang support was removed in 0.57.0) and this repo's" >&2
-        echo "       user/.config/hypr is hyprlang. 0.56.2 is the newest usable." >&2
+# Debian's own hardening flags. -g is stripped because nothing here keeps debug
+# symbols and it roughly doubles the memory a C++ compile needs; the
+# reproducible-path options are off because they rewrite paths relative to
+# wherever the script happens to be run from. CMake never reads CPPFLAGS, which
+# is where _FORTIFY_SOURCE lives, so it is folded into the compiler flags and
+# CPPFLAGS left empty, so meson does not get it twice.
+set_hardening_flags() {
+    export DEB_BUILD_MAINT_OPTIONS='hardening=+all reproducible=-fixfilepath,-fixdebugpath'
+    export DEB_CFLAGS_MAINT_STRIP=-g DEB_CXXFLAGS_MAINT_STRIP=-g
+    local cppflags
+    cppflags=$(dpkg-buildflags --get CPPFLAGS)
+    CFLAGS="$(dpkg-buildflags --get CFLAGS) $cppflags"
+    CXXFLAGS="$(dpkg-buildflags --get CXXFLAGS) $cppflags"
+    LDFLAGS=$(dpkg-buildflags --get LDFLAGS)
+    export CFLAGS CXXFLAGS LDFLAGS CPPFLAGS=''
+}
+
+# Clones <url> at <tag> into <dir> and refuses to continue unless the checkout
+# is <commit>. Extra arguments go to git clone.
+clone_pinned() {
+    local url=$1 tag=$2 commit=$3 dir=$4
+    shift 4
+    rm -rf "$dir"
+    git clone --depth 1 --branch "$tag" "$@" "$url" "$dir"
+    local head
+    head=$(git -C "$dir" rev-parse HEAD)
+    if [[ "$head" != "$commit" ]]; then
+        echo "ERROR: $url tag $tag is $head, expected $commit." >&2
+        echo "       The tag has moved; check upstream before trusting it." >&2
+        rm -rf "$dir"
         exit 1
     fi
 }
@@ -106,17 +186,27 @@ install_build_dependencies() {
         libevdev-dev \
         libmtdev-dev \
         libudev-dev \
-        libwacom-dev
+        libwacom-dev \
+        libreadline-dev \
+        libseat-dev \
+        libdisplay-info-dev \
+        hwdata \
+        libffi-dev \
+        libpugixml-dev \
+        libjpeg-dev \
+        libwebp-dev \
+        libpng-dev \
+        librsvg2-dev \
+        libmagic-dev \
+        libjxl-dev \
+        libheif-dev
 
     # NotAutomatic, so these need an explicit target release. libxkbcommon-dev
     # is here because 0.56.2 wants >= 1.11 and trixie proper has 1.7.
-    echo ">>> Installing the hypr libraries from trixie-backports..."
+    echo ">>> Installing hyprutils, hyprcursor and xkbcommon from trixie-backports..."
     sudo apt install -y --no-install-recommends -t trixie-backports \
         hyprwayland-scanner \
-        libaquamarine-dev \
         libhyprcursor-dev \
-        libhyprgraphics-dev \
-        libhyprlang-dev \
         libhyprutils-dev \
         libxkbcommon-dev
 }
@@ -133,15 +223,18 @@ prepare_prefix() {
 # there is no liblua.so to find at runtime; the .pc written below is what
 # Hyprland's pkg_search_module(lua5.5) looks for.
 build_lua() {
-    if pkg-config --exact-version="$LUA_VERSION" lua5.5 2>/dev/null; then
-        echo ">>> Lua $LUA_VERSION already in $PREFIX."
-        return
-    fi
     echo ">>> Building Lua $LUA_VERSION..."
-    local dir="$SRC/lua-$LUA_VERSION"
-    rm -rf "$dir"
-    curl -fsSL "https://www.lua.org/ftp/lua-$LUA_VERSION.tar.gz" | tar -xz -C "$SRC"
-    make -C "$dir" -j"$JOBS" linux MYCFLAGS=-fPIC
+    local dir="$SRC/lua-$LUA_VERSION" tarball="$SRC/lua-$LUA_VERSION.tar.gz"
+    rm -rf "$dir" "$tarball"
+    curl -fsSL -o "$tarball" "https://www.lua.org/ftp/lua-$LUA_VERSION.tar.gz"
+    if ! echo "$LUA_SHA256  $tarball" | sha256sum --check --quiet; then
+        echo "ERROR: $tarball does not match the SHA-256 lua.org publishes." >&2
+        rm -f "$tarball"
+        exit 1
+    fi
+    tar -xzf "$tarball" -C "$SRC"
+    # Lua's Makefile sets CFLAGS itself; MYCFLAGS and MYLDFLAGS are its hooks.
+    make -C "$dir" -j"$JOBS" linux MYCFLAGS="-fPIC $CFLAGS" MYLDFLAGS="$LDFLAGS"
     sudo make -C "$dir" install INSTALL_TOP="$PREFIX"
     sudo tee "$PREFIX/lib/pkgconfig/lua5.5.pc" >/dev/null <<PC
 prefix=$PREFIX
@@ -166,16 +259,10 @@ PC
 # makes the scanner dependency, which is optional with tests off, come up not
 # found; nofallback stops meson reaching for a wayland subproject instead.
 build_wayland_protocols() {
-    if pkg-config --exact-version="$WAYLAND_PROTOCOLS_VERSION" wayland-protocols 2>/dev/null \
-        && [[ "$(pkg-config --variable=prefix wayland-protocols)" == "$PREFIX" ]]; then
-        echo ">>> wayland-protocols $WAYLAND_PROTOCOLS_VERSION already in $PREFIX."
-        return
-    fi
     echo ">>> Building wayland-protocols $WAYLAND_PROTOCOLS_VERSION..."
     local dir="$SRC/wayland-protocols"
-    rm -rf "$dir"
-    git clone --depth 1 --branch "$WAYLAND_PROTOCOLS_VERSION" \
-        https://gitlab.freedesktop.org/wayland/wayland-protocols.git "$dir"
+    clone_pinned https://gitlab.freedesktop.org/wayland/wayland-protocols.git \
+        "$WAYLAND_PROTOCOLS_VERSION" "$WAYLAND_PROTOCOLS_COMMIT" "$dir"
     PKG_CONFIG_LIBDIR=/nonexistent PKG_CONFIG_PATH='' meson setup "$dir/build" "$dir" \
         --prefix="$PREFIX" \
         --wrap-mode=nofallback \
@@ -188,16 +275,10 @@ build_wayland_protocols() {
 # takes it from udev's own pkg-config - /usr/lib/udev - and `sudo ninja install`
 # would overwrite the system libinput's udev rules and hwdb entries with these.
 build_libinput() {
-    if pkg-config --exact-version="$LIBINPUT_VERSION" libinput 2>/dev/null \
-        && [[ "$(pkg-config --variable=prefix libinput)" == "$PREFIX" ]]; then
-        echo ">>> libinput $LIBINPUT_VERSION already in $PREFIX."
-        return
-    fi
     echo ">>> Building libinput $LIBINPUT_VERSION..."
     local dir="$SRC/libinput"
-    rm -rf "$dir"
-    git clone --depth 1 --branch "$LIBINPUT_VERSION" \
-        https://gitlab.freedesktop.org/libinput/libinput.git "$dir"
+    clone_pinned https://gitlab.freedesktop.org/libinput/libinput.git \
+        "$LIBINPUT_VERSION" "$LIBINPUT_COMMIT" "$dir"
     meson setup "$dir/build" "$dir" \
         --prefix="$PREFIX" \
         --libdir=lib \
@@ -212,15 +293,55 @@ build_libinput() {
     sudo ninja -C "$dir/build" install
 }
 
+# Applies build_hyprland-patches/<name>/*.patch, if there are any, to <dir>.
+apply_patches() {
+    local name=$1 dir=$2 patch
+    for patch in "$PATCH_DIR/$name"/*.patch; do
+        [[ -e "$patch" ]] || continue
+        echo ">>> Applying $name/$(basename "$patch")..."
+        git -C "$dir" apply "$patch"
+    done
+}
+
+# Builds one hypr library from HYPR_LIBS (name:tag:commit) into the prefix.
+# Testing is off: the test suites want GTest and are upstream's job.
+# pkgcfg_lib_deps_input is preset for the same reason as in build_hyprland:
+# aquamarine is the libinput consumer, and left alone CMake would hand it
+# trixie's 1.28 from /usr/lib instead of the prefix's 1.29. Harmless for the
+# others, which have no libinput in their `deps`.
+build_hypr_lib() {
+    local name tag commit dir
+    IFS=: read -r name tag commit <<<"$1"
+    echo ">>> Building $name $tag..."
+    dir="$SRC/$name"
+    clone_pinned "https://github.com/hyprwm/$name" "v$tag" "$commit" "$dir"
+    apply_patches "$name" "$dir"
+    cmake -GNinja -B "$dir/build" -S "$dir" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX="$PREFIX" \
+        -DCMAKE_INSTALL_LIBDIR=lib \
+        -DCMAKE_PREFIX_PATH="$PREFIX" \
+        -DBUILD_TESTING=OFF \
+        -Dpkgcfg_lib_deps_input="$PREFIX/lib/libinput.so"
+    cmake --build "$dir/build" -j"$JOBS"
+    sudo cmake --install "$dir/build"
+}
+
+build_hypr_libs() {
+    local lib
+    for lib in "${HYPR_LIBS[@]}"; do
+        build_hypr_lib "$lib"
+    done
+}
+
 fetch_hyprland() {
+    echo ">>> Cloning Hyprland v$HYPRLAND_VERSION and glaze $GLAZE_VERSION..."
     local dir="$SRC/Hyprland-$HYPRLAND_VERSION"
-    if [[ ! -d "$dir/.git" ]]; then
-        echo ">>> Cloning Hyprland v$HYPRLAND_VERSION..."
-        git clone --recursive --depth 1 --shallow-submodules \
-            --branch "v$HYPRLAND_VERSION" https://github.com/hyprwm/Hyprland "$dir"
-    else
-        echo ">>> Using the existing checkout in $dir."
-    fi
+    clone_pinned https://github.com/hyprwm/Hyprland "v$HYPRLAND_VERSION" \
+        "$HYPRLAND_COMMIT" "$dir" --recursive --shallow-submodules
+    apply_patches hyprland "$dir"
+    clone_pinned https://github.com/stephenberry/glaze.git "v$GLAZE_VERSION" \
+        "$GLAZE_COMMIT" "$SRC/glaze"
 }
 
 # --disable-new-dtags makes the linker write DT_RPATH instead of DT_RUNPATH.
@@ -232,12 +353,24 @@ fetch_hyprland() {
 build_hyprland() {
     local dir="$SRC/Hyprland-$HYPRLAND_VERSION"
     echo ">>> Configuring Hyprland $HYPRLAND_VERSION..."
+    # An explicit CMAKE_EXE_LINKER_FLAGS replaces the LDFLAGS CMake would have
+    # taken from the environment, so the hardening flags are repeated here.
+    #
+    # pkgcfg_lib_deps_input is preset because CMake gets it wrong on its own:
+    # pkg_check_modules turns each -l into a full path by searching the -L
+    # directories of the whole dependency group in order, another module in
+    # that group contributes -L/usr/lib/x86_64-linux-gnu ahead of the prefix,
+    # and so it settles on trixie's libinput 1.28 even though pkg-config chose
+    # 1.29. The link then fails on the 1.29-only eraser-button functions.
     cmake -GNinja -B "$dir/build" -S "$dir" \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX="$PREFIX" \
         -DCMAKE_PREFIX_PATH="$PREFIX" \
         -DCMAKE_INSTALL_RPATH="$PREFIX/lib" \
-        -DCMAKE_EXE_LINKER_FLAGS="-Wl,--disable-new-dtags"
+        -DCMAKE_EXE_LINKER_FLAGS="$LDFLAGS -Wl,--disable-new-dtags" \
+        -Dpkgcfg_lib_deps_input="$PREFIX/lib/libinput.so" \
+        -DFETCHCONTENT_SOURCE_DIR_GLAZE="$SRC/glaze" \
+        -DFETCHCONTENT_FULLY_DISCONNECTED=ON
 
     echo ">>> Building Hyprland with $JOBS jobs..."
     cmake --build "$dir/build" -j"$JOBS"
@@ -274,35 +407,127 @@ Keywords=tiling;wayland;compositor;
 DESKTOP
 }
 
+# Compile-time hardening is checked where it is decided, on the compile
+# commands, because a binary cannot prove it: fortify only rewrites a call
+# whose buffer size the compiler can see, so a correctly built binary may well
+# import no __*_chk function at all (hyprctl is one). Every compile in the given
+# ninja build must carry every flag set_hardening_flags asked for. Zero
+# compiles found is an error too, so a pattern that stops matching cannot pass.
+check_compile_flags() {
+    local build=$1 commands compiles flag bad
+    commands=$(ninja -C "$build" -t commands)
+    compiles=$(grep -E ' -c [^ ]+\.(c|cc|cpp|cxx)( |$)' <<<"$commands" || true)
+    if [[ -z "$compiles" ]]; then
+        echo "ERROR: found no compile commands in $build." >&2
+        exit 1
+    fi
+    for flag in -D_FORTIFY_SOURCE= -fstack-protector-strong -fstack-clash-protection -fcf-protection; do
+        bad=$(grep -cv -- "$flag" <<<"$compiles" || true)
+        if ((bad)); then
+            echo "ERROR: $bad compiles in $build lack $flag." >&2
+            exit 1
+        fi
+    done
+    echo ">>> $(grep -c . <<<"$compiles") compiles in $build: fortify, stack protector, stack clash, CET."
+}
+
+# Lua is built by a plain Makefile with no command log to read, so its archive
+# is checked for the result instead: it has fixed-size buffers and snprintf
+# calls fortify can see, so a hardened build always references both of these.
+check_lua_archive() {
+    local symbols
+    symbols=$(nm "$PREFIX/lib/liblua.a")
+    if [[ "$symbols" != *__stack_chk_fail* || ! "$symbols" =~ __[a-z0-9_]+_chk[[:space:]] ]]; then
+        echo "ERROR: $PREFIX/lib/liblua.a was not built with the hardening flags." >&2
+        exit 1
+    fi
+    echo ">>> liblua.a: stack protector, fortify."
+}
+
+# Link-time hardening is visible on the files themselves: full RELRO is a
+# GNU_RELRO segment plus BIND_NOW. Every ELF file under the prefix is checked.
+# Each readelf is captured first for the same SIGPIPE reason as the ldd below.
+check_link_flags() {
+    local file dynamic segments count=0
+    while IFS= read -r -d '' file; do
+        cmp -s -n 4 "$file" <(printf '\177ELF') || continue
+        dynamic=$(readelf -dW "$file")
+        segments=$(readelf -lW "$file")
+        if [[ "$segments" != *GNU_RELRO* || "$dynamic" != *BIND_NOW* ]]; then
+            echo "ERROR: $file is not linked with full RELRO (relro + bindnow)." >&2
+            exit 1
+        fi
+        count=$((count + 1))
+    done < <(find "$PREFIX" -type f -print0)
+    echo ">>> $count ELF files under $PREFIX: full RELRO."
+}
+
+# Fails unless <binary> loads exactly one hyprutils and takes libinput and
+# every library in HYPR_LIBS it uses from the prefix rather than /usr/lib. The
+# libraries named after <binary> must be loaded at all - a binary that never
+# loads libinput would pass the prefix test vacuously.
+check_loaded_libs() {
+    local binary=$1 libs lib name line hyprutils
+    shift
+    # Captured first: `ldd | grep -q` under pipefail fails whenever grep exits
+    # early and ldd takes the SIGPIPE, which would report a good build as bad.
+    libs=$(ldd "$binary")
+    for name in "$@"; do
+        if [[ "$libs" != *"$name.so"* ]]; then
+            echo "ERROR: $binary does not load $name at all." >&2
+            exit 1
+        fi
+    done
+    for lib in libinput "${HYPR_LIBS[@]}"; do
+        name=${lib%%:*}
+        name=lib${name#lib}
+        line=$(grep "$name\.so" <<<"$libs" || true)
+        if [[ -n "$line" && "$line" != *"=> $PREFIX/lib/"* ]]; then
+            echo "ERROR: $binary does not load $name from $PREFIX/lib:" >&2
+            echo "$line" >&2
+            exit 1
+        fi
+    done
+    hyprutils=$(grep -c 'libhyprutils\.so' <<<"$libs" || true)
+    if ((hyprutils != 1)); then
+        echo "ERROR: $binary loads $hyprutils copies of hyprutils:" >&2
+        grep 'libhyprutils\.so' <<<"$libs" >&2
+        exit 1
+    fi
+    echo ">>> $(basename "$binary"): one hyprutils; libinput and the hypr libraries from $PREFIX/lib."
+}
+
 # The checks that matter before logging in: the binary is the expected version,
-# it loads libinput from the prefix rather than /usr/lib, and it accepts this
-# repo's config. A config error would otherwise only show up as a red banner
-# after the login.
+# it is hardened, it loads libinput from the prefix rather than /usr/lib, and
+# it accepts this repo's config. A config error would otherwise only show up as
+# a red banner after the login.
 verify() {
     echo ">>> Installed version:"
     "$PREFIX/bin/Hyprland" --version | head -1
 
-    # Captured first: `ldd | grep -q` under pipefail fails whenever grep exits
-    # early and ldd takes the SIGPIPE, which would report a good build as bad.
-    local libinput
-    libinput=$(ldd "$PREFIX/bin/Hyprland" | grep 'libinput\.so' || true)
-    if [[ "$libinput" != *"=> $PREFIX/lib/"* ]]; then
-        echo "ERROR: Hyprland does not load libinput from $PREFIX/lib:" >&2
-        echo "${libinput:-  (no libinput in ldd output)}" >&2
-        exit 1
-    fi
-    echo ">>> libinput resolves from $PREFIX/lib."
+    check_loaded_libs "$PREFIX/bin/Hyprland" libinput libaquamarine libhyprlang libhyprgraphics
+    check_loaded_libs "$PREFIX/bin/hyprctl" libhyprwire
+
+    check_compile_flags "$SRC/Hyprland-$HYPRLAND_VERSION/build"
+    check_compile_flags "$SRC/libinput/build"
+    local lib
+    for lib in "${HYPR_LIBS[@]}"; do
+        check_compile_flags "$SRC/${lib%%:*}/build"
+    done
+    check_lua_archive
+    check_link_flags
 
     echo ">>> Checking ~/.config/hypr/hyprland.conf against $HYPRLAND_VERSION..."
     "$PREFIX/bin/Hyprland" --verify-config
 }
 
-check_version
 install_build_dependencies
+set_hardening_flags
 prepare_prefix
 build_lua
 build_wayland_protocols
 build_libinput
+build_hypr_libs
 fetch_hyprland
 build_hyprland
 install_session

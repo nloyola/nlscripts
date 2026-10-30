@@ -1,0 +1,40 @@
+From: Constantin Piber <cp.piber@gmail.com>
+Date: Tue, 18 Nov 2025 15:43:15 +0800
+Subject: Fix FTBFS around a missing operator+
+
+There seems to be a missing operator+(std::string, std::string_view) or
+something, so cast it to std:;string.
+
+Origin: https://github.com/cpiber/hyprland-ppa/blob/0dcd5f3101f7ced40879d0f34f337b1a2cdd79ae/hyprland/debian/patches/05-libcpp-port
+Forwarded: not-needed
+---
+ hyprctl/src/main.cpp | 2 +-
+ src/xwayland/XWM.hpp | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/hyprctl/src/main.cpp b/hyprctl/src/main.cpp
+index ae2dfe6..48433ab 100644
+--- a/hyprctl/src/main.cpp
++++ b/hyprctl/src/main.cpp
+@@ -296,7 +296,7 @@ int requestIPC(std::string_view filename, std::string_view arg) {
+     sockaddr_un serverAddress = {0};
+     serverAddress.sun_family  = AF_UNIX;
+ 
+-    std::string socketPath = getRuntimeDir() + "/" + instanceSignature + "/" + filename;
++    std::string socketPath = getRuntimeDir() + "/" + instanceSignature + "/" + std::string(filename);
+ 
+     strncpy(serverAddress.sun_path, socketPath.c_str(), sizeof(serverAddress.sun_path) - 1);
+ 
+diff --git a/src/xwayland/XWM.hpp b/src/xwayland/XWM.hpp
+index 5927031..a8cced1 100644
+--- a/src/xwayland/XWM.hpp
++++ b/src/xwayland/XWM.hpp
+@@ -216,7 +216,7 @@ class CXWM {
+     std::vector<SP<CX11DataOffer>>            m_dndDataOffers;
+ 
+     inline xcb_connection_t*                  getConnection() {
+-        return m_connection ? *m_connection : nullptr;
++        return m_connection ? static_cast<xcb_connection_t*>(*m_connection) : nullptr;
+     }
+     struct {
+         CHyprSignalListener newWLSurface;

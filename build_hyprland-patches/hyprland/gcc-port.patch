@@ -1,0 +1,49 @@
+From: Constantin Piber <cp.piber@gmail.com>
+Date: Tue, 18 Nov 2025 15:43:15 +0800
+Subject: Workaround some missing gnu++26 features
+
+Can be dropped when Debian's gcc catches up
+
+Origin: https://github.com/cpiber/hyprland-ppa/blob/0dcd5f3101f7ced40879d0f34f337b1a2cdd79ae/hyprland/debian/patches/04-gcc-port
+Forwarded: not-needed
+
+Co-Authored-By: Chow Loong Jin <hyperair@debian.org>
+---
+ src/helpers/MiscFunctions.cpp | 9 ++++++++-
+ src/output/Monitor.cpp        | 3 ++-
+ 2 files changed, 10 insertions(+), 2 deletions(-)
+
+diff --git a/src/helpers/MiscFunctions.cpp b/src/helpers/MiscFunctions.cpp
+index be4f033..6219163 100644
+--- a/src/helpers/MiscFunctions.cpp
++++ b/src/helpers/MiscFunctions.cpp
+@@ -838,7 +838,14 @@ bool truthy(const std::string& str) {
+     });
+ 
+     return [&](auto&&... prefixes) -> bool {
+-        return (... || std::ranges::starts_with(str_view, prefixes));
++        return (... || [str_view](auto &&prefix) {
++                return str_view.size() >= prefix.size() && std::ranges::all_of(
++                    std::views::zip(prefix, str_view),
++                    [](const auto &pair) {
++                        return std::get<0>(pair) == std::get<1>(pair);
++                    }
++                );
++            }(prefixes));
+     }("true"sv, "yes"sv, "on"sv);
+     // clang-format on
+ }
+diff --git a/src/output/Monitor.cpp b/src/output/Monitor.cpp
+index e69d8dd..5b0e058 100644
+--- a/src/output/Monitor.cpp
++++ b/src/output/Monitor.cpp
+@@ -761,7 +761,8 @@ bool CMonitor::applyMonitorRule(Config::CMonitorRule&& pMonitorRule) {
+         std::ranges::sort(sortedModes, sortFunc);
+         if (sortedModes.size() > 3)
+             sortedModes.erase(sortedModes.begin() + 3, sortedModes.end());
+-        requestedModes.insert_range(requestedModes.end(), sortedModes | std::views::reverse);
++        auto x = sortedModes | std::views::reverse;
++        requestedModes.insert(requestedModes.end(), x.cbegin(), x.cend());
+     };
+ 
+     // last fallback is always preferred mode

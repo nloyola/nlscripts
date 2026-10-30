@@ -1,0 +1,27 @@
+From: Carl Keinath <carl.keinath@gmail.com>
+Date: Sun, 10 May 2026 08:13:57 +0200
+Subject: read pending data before handling POLLHUP
+
+Forwarded: https://github.com/hyprwm/hyprwire/pull/27
+---
+ src/core/client/ClientSocket.cpp | 5 +----
+ 1 file changed, 1 insertion(+), 4 deletions(-)
+
+diff --git a/src/core/client/ClientSocket.cpp b/src/core/client/ClientSocket.cpp
+index 9f1e3d4..b9d9ae3 100644
+--- a/src/core/client/ClientSocket.cpp
++++ b/src/core/client/ClientSocket.cpp
+@@ -144,12 +144,9 @@ bool CClientSocket::dispatchEvents(bool block) {
+     if (m_handshakeDone)
+         Syscalls::poll(m_pollfds.data(), m_pollfds.size(), block ? -1 : 0);
+ 
+-    if (m_pollfds[0].revents & POLLHUP)
+-        return false;
+-
+     if (!(m_pollfds[0].revents & POLLIN)) {
+         collectOrphanedObjects();
+-        return true;
++        return !(m_pollfds[0].revents & POLLHUP);
+     }
+ 
+     // dispatch

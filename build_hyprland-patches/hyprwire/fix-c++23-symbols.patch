@@ -1,0 +1,147 @@
+Description: fix-c++23-symbols.patch
+ replace append_range with insert, to support non c++23 builds
+Author: Carl Keinath <carl.keinath@gmail.com>
+Last-Update: 2026-06-03
+
+Forwarded: not-needed
+---
+--- a/src/core/message/messages/HandshakeBegin.cpp
++++ b/src/core/message/messages/HandshakeBegin.cpp
+@@ -62,7 +62,9 @@
+         HW_MESSAGE_MAGIC_TYPE_UINT,
+     };
+ 
+-    m_data.append_range(g_messageParser->encodeVarInt(versions.size()));
++    // m_data.append_range(g_messageParser->encodeVarInt(versions.size()));
++    auto v = g_messageParser->encodeVarInt(versions.size());
++    m_data.insert(m_data.end(), v.begin(), v.end());
+ 
+     const size_t HEAD_SIZE = m_data.size();
+ 
+--- a/src/core/socket/SocketHelpers.cpp
++++ b/src/core/socket/SocketHelpers.cpp
+@@ -43,7 +43,8 @@
+         if (sizeWritten < 0)
+             return {.bad = true};
+ 
+-        message.data.append_range(std::span<uint8_t>(buffer, sizeWritten));
++        // message.data.append_range(std::span<uint8_t>(buffer, sizeWritten));
++        message.data.insert(message.data.end(), buffer, buffer + sizeWritten);
+ 
+         // check for control
+         cmsghdr* recvdCmsg = CMSG_FIRSTHDR(&msg);
+--- a/src/core/message/messages/FatalProtocolError.cpp
++++ b/src/core/message/messages/FatalProtocolError.cpp
+@@ -68,7 +68,10 @@
+     std::memcpy(&m_data[2], &objectId, sizeof(objectId));
+     std::memcpy(&m_data[7], &errorId, sizeof(errorId));
+ 
+-    m_data.append_range(g_messageParser->encodeVarInt(msg.size()));
+-    m_data.append_range(msg);
++    // m_data.append_range(g_messageParser->encodeVarInt(msg.size()));
++    // m_data.append_range(msg);
++    auto enc = g_messageParser->encodeVarInt(msg.size());
++    m_data.insert(m_data.end(), enc.begin(), enc.end());
++    m_data.insert(m_data.end(), msg.begin(), msg.end());
+     m_data.emplace_back(HW_MESSAGE_MAGIC_END);
+ }
+--- a/src/core/wireObject/IWireObject.cpp
++++ b/src/core/wireObject/IWireObject.cpp
+@@ -146,8 +146,12 @@
+             case HW_MESSAGE_MAGIC_TYPE_VARCHAR: {
+                 data.emplace_back(HW_MESSAGE_MAGIC_TYPE_VARCHAR);
+                 auto str = va_arg(va, const char*);
+-                data.append_range(g_messageParser->encodeVarInt(std::string_view(str).size()));
+-                data.append_range(std::string_view(str));
++                // data.append_range(g_messageParser->encodeVarInt(std::string_view(str).size()));
++                // data.append_range(std::string_view(str));
++                auto enc1 = g_messageParser->encodeVarInt(std::string_view(str).size());
++                data.insert(data.end(), enc1.begin(), enc1.end());
++                auto sv1 = std::string_view(str);
++                data.insert(data.end(), sv1.begin(), sv1.end());
+                 break;
+             }
+ 
+@@ -158,7 +162,9 @@
+ 
+                 auto arrayData = va_arg(va, void*);
+                 auto arrayLen  = va_arg(va, uint32_t);
+-                data.append_range(g_messageParser->encodeVarInt(arrayLen));
++                // data.append_range(g_messageParser->encodeVarInt(arrayLen));
++                auto enc2 = g_messageParser->encodeVarInt(arrayLen);
++                data.insert(data.end(), enc2.begin(), enc2.end());
+ 
+                 switch (arrType) {
+                     case HW_MESSAGE_MAGIC_TYPE_UINT:
+@@ -181,8 +187,12 @@
+                     case HW_MESSAGE_MAGIC_TYPE_VARCHAR: {
+                         for (size_t i = 0; i < arrayLen; ++i) {
+                             const char* element = rc<const char**>(arrayData)[i];
+-                            data.append_range(g_messageParser->encodeVarInt(std::string_view(element).size()));
+-                            data.append_range(std::string_view(element));
++                            // data.append_range(g_messageParser->encodeVarInt(std::string_view(element).size()));
++                            // data.append_range(std::string_view(element));
++                            auto enc3 = g_messageParser->encodeVarInt(std::string_view(element).size());
++                            data.insert(data.end(), enc3.begin(), enc3.end());
++                            auto sv2 = std::string_view(element);
++                            data.insert(data.end(), sv2.begin(), sv2.end());
+                         }
+                         break;
+                     }
+@@ -264,7 +274,8 @@
+     if (!method.returnsType.empty())
+         params.emplace_back(HW_MESSAGE_MAGIC_TYPE_SEQ);
+ 
+-    params.append_range(method.params);
++    // params.append_range(method.params);
++    params.insert(params.end(), method.params.begin(), method.params.end());
+ 
+     if (method.since > m_version) {
+         const auto MSG = std::format("method {} since {} but has {}", id, method.since, m_version);
+--- a/src/core/message/messages/BindProtocol.cpp
++++ b/src/core/message/messages/BindProtocol.cpp
+@@ -67,10 +67,15 @@
+ 
+     m_data.emplace_back(HW_MESSAGE_MAGIC_TYPE_VARCHAR);
+ 
+-    m_data.append_range(g_messageParser->encodeVarInt(protocol.length()));
+-    m_data.append_range(protocol);
+-
+-    m_data.append_range(std::vector<uint8_t>{HW_MESSAGE_MAGIC_TYPE_UINT, 0, 0, 0, 0});
++    // m_data.append_range(g_messageParser->encodeVarInt(protocol.length()));
++    // m_data.append_range(protocol);
++    //
++    // m_data.append_range(std::vector<uint8_t>{HW_MESSAGE_MAGIC_TYPE_UINT, 0, 0, 0, 0});
++    auto enc = g_messageParser->encodeVarInt(protocol.length());
++    m_data.insert(m_data.end(), enc.begin(), enc.end());
++    m_data.insert(m_data.end(), protocol.begin(), protocol.end());
++    const uint8_t tmp[] = {HW_MESSAGE_MAGIC_TYPE_UINT, 0, 0, 0, 0};
++    m_data.insert(m_data.end(), std::begin(tmp), std::end(tmp));
+ 
+     std::memcpy(&m_data[m_data.size() - 4], &version, sizeof(version));
+ 
+--- a/src/core/message/messages/HandshakeProtocols.cpp
++++ b/src/core/message/messages/HandshakeProtocols.cpp
+@@ -61,11 +61,19 @@
+         HW_MESSAGE_MAGIC_TYPE_VARCHAR,
+     };
+ 
+-    m_data.append_range(g_messageParser->encodeVarInt(protocols.size()));
++    // m_data.append_range(g_messageParser->encodeVarInt(protocols.size()));
++    //
++    // for (const auto& p : protocols) {
++    //     m_data.append_range(g_messageParser->encodeVarInt(p.size()));
++    //     m_data.append_range(p);
++    // }
++    auto enc = g_messageParser->encodeVarInt(protocols.size());
++    m_data.insert(m_data.end(), enc.begin(), enc.end());
+ 
+     for (const auto& p : protocols) {
+-        m_data.append_range(g_messageParser->encodeVarInt(p.size()));
+-        m_data.append_range(p);
++        auto enc2 = g_messageParser->encodeVarInt(p.size());
++        m_data.insert(m_data.end(), enc2.begin(), enc2.end());
++        m_data.insert(m_data.end(), p.begin(), p.end());
+     }
+ 
+     m_data.emplace_back(HW_MESSAGE_MAGIC_END);
