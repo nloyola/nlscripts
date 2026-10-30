@@ -1187,10 +1187,22 @@ cmd_remove() {
     [ "$name" = "$(cmd_current)" ] &&
         die "$name is the live theme - switch away from it first"
 
+    # The set comes from the package line, read before the theme goes: install
+    # files a package under its own name, but a monorepo's themes share one
+    # set - every Omarchy bundled theme lands in "omarchy" - so the name alone
+    # would point at a directory that does not hold them. The manifest is what
+    # says the set really has this theme's backgrounds in it.
+    wallpaper_set=$name
+    if [ -r "$dir/upstream" ] && source=$(package_source "$dir/upstream") &&
+       [ -n "$source" ]; then
+        set -- $source
+        case $4 in ''|*/*|.*) ;; *) wallpaper_set=$4 ;; esac
+    fi
+
     rm -rf "$dir" || exit 1
     echo "$name: removed"
-    [ -d "$WALLPAPER_LIB/$name" ] &&
-        echo "its wallpapers are left in $WALLPAPER_LIB/$name"
+    [ -r "$WALLPAPER_LIB/$wallpaper_set/.qs-theme-managed-$name" ] &&
+        echo "its wallpapers ($name-*) are left in $WALLPAPER_LIB/$wallpaper_set"
     :
 }
 
