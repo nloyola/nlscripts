@@ -1,0 +1,33 @@
+Subject: Unsuspend windows of a workspace restored to a reconnected monitor
+
+When a monitor disconnects, its workspace moves to another monitor as a
+background workspace and its windows get xdg_toplevel SUSPENDED. When the
+monitor reconnects, setupDefaultWS() moves the workspace back with
+moveWorkspaceToMonitor(), which recomputes suspended states while the
+workspace is not yet visible, and then makes it the active, visible
+workspace by assignment without recomputing them. The later restore in
+onConnect() calls changeWorkspace(), which returns early because the
+workspace is already active. GTK 4 clients stop drawing while suspended,
+so the window stays frozen until it is moved to another workspace.
+
+Seen on asterix with a monitor that drops hot-plug when it wakes from
+standby. Not checked against upstream main, which has rewritten this code.
+
+Forwarded: no
+---
+diff --git a/src/output/Monitor.cpp b/src/output/Monitor.cpp
+index 5b0e058..819ac82 100644
+--- a/src/output/Monitor.cpp
++++ b/src/output/Monitor.cpp
+@@ -1330,6 +1330,11 @@ void CMonitor::setupDefaultWS(const Config::CMonitorRule& monitorRule) {
+     PNEWWORKSPACE->m_events.activeChanged.emit();
+     PNEWWORKSPACE->m_visible     = true;
+     PNEWWORKSPACE->m_lastMonitor = "";
++
++    // moveWorkspaceToMonitor above already recomputed suspended states, but
++    // before this workspace became the visible one, so a workspace moved back
++    // from another monitor keeps its windows suspended.
++    Desktop::globalWindowController()->updateSuspendedStates();
+ }
+ 
+ void CMonitor::setMirror(const std::string& mirrorOf) {

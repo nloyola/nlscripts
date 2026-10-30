@@ -4,14 +4,13 @@ set -euo pipefail
 # Build Hyprland from source into its own prefix (/opt/hyprland) and offer it as
 # a second gdm session, beside the Debian package rather than over it.
 #
-# WHY: asterix runs Hyprland 0.55.2 from trixie-backports, and on 0.55.2 a
-# window group on a monitor that replugs - the Philips on DP-1 drops hot-plug
-# every time it wakes from standby - comes back half broken: both members
-# mapped, neither hidden, and the one in front never gets another frame
-# callback, so a GTK4 window (ghostty) stops drawing and stops taking input.
-# 0.56.0 fixes group/monitor desync (#14478), a crash on group dissolution
-# (#15135) and skipped frame scheduling (#15404). Debian unstable has 0.56.2,
-# but trixie-backports cannot follow until it has Lua 5.5 and libinput >= 1.29.
+# WHY: asterix runs Hyprland 0.55.2 from trixie-backports, where a GTK 4 window
+# (ghostty) on a monitor that replugs - the Philips on DP-1 drops hot-plug every
+# time it wakes from standby - stops drawing for good; see THE FREEZE ITSELF
+# below. A source build is what lets that be patched, and 0.56 also brings
+# fixes for the group crashes 0.55.2 has (#14478, #15135). Debian unstable has
+# 0.56.2, but trixie-backports cannot follow until it has Lua 5.5 and
+# libinput >= 1.29.
 #
 # WHY 0.56.2 AND NOT NEWER: 0.57.0 removed hyprlang config support outright
 # (#15539, "remove legacy config support") and reads only Lua. Every file under
@@ -53,6 +52,12 @@ set -euo pipefail
 #     unchanged: the GCC 14 fix and upstream PR #27, which the hyprwire on
 #     this machine already carries.
 # Drop them once Debian's default GCC is 15.
+#
+# THE FREEZE ITSELF is not fixed by 0.56; hyprland/suspended-on-reconnect.patch
+# is. When DP-1 replugs on wake, its workspace comes back with every window
+# still flagged xdg_toplevel SUSPENDED, and GTK 4 stops drawing a suspended
+# window. setupDefaultWS() makes the workspace visible without recomputing
+# that flag; the patch recomputes it there. The patch says why in full.
 #
 # SUPPLY CHAIN: every download is pinned. Lua's tarball is checked against the
 # SHA-256 lua.org publishes, and every git clone must land on a known commit or
