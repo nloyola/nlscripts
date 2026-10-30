@@ -80,6 +80,7 @@ install_build_dependencies() {
         ninja-build \
         pkg-config \
         glslang-dev \
+        glslang-tools \
         libcairo2-dev \
         libdrm-dev \
         libegl-dev \
