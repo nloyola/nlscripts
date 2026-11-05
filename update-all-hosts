@@ -5,7 +5,8 @@
 #       Run <command> on every host in home_config's nix/hosts/, all at once,
 #       and finish with one line per host: ok, failed or unreachable, and why.
 #       The default command is
-#           cd ~/home_config && git pull && hm-switch && hm-switch --gc
+#           cd ~/home_config && git pull &&
+#           git submodule update --init --recursive && hm-switch && hm-switch --gc
 #       --host limits the run to the named hosts (repeatable). --off-lan
 #       reaches berlix through its tailnet alias instead of the LAN one.
 #
@@ -30,6 +31,13 @@
 # PATH export is there for the local host, where the login shell resets PATH
 # and `nix` itself lives in the default profile.
 #
+# THE SUBMODULES ARE UPDATED EXPLICITLY, not left to `git pull`. A pull only
+# moves them when submodule.recurse is on, and that is per-host git config:
+# several hosts carry `recurse = false` in the checkout's own .git/config,
+# which outranks ~/.gitconfig, so their nlscripts and themes sat behind the
+# commit master records. Updating checks out exactly that commit, as the
+# recursing pull would, and does nothing where the two already agree.
+#
 # NOTHING IS REPAIRED. A dirty tree, an unknown host key or a file hm-switch
 # would clobber is reported with a hint and left alone; stashing, trusting a
 # key or `hm-switch -b backup` are decisions for whoever is running this.
@@ -52,7 +60,7 @@ SSH=${UPDATE_ALL_HOSTS_SSH:-ssh}
 LOCAL_SHELL=${UPDATE_ALL_HOSTS_SHELL:-bash}
 IDENTITY=${UPDATE_ALL_HOSTS_IDENTITY:-${USER:-$(id -un)}@$(uname -n)}
 
-DEFAULT_COMMAND='cd ~/home_config && git pull && hm-switch && hm-switch --gc'
+DEFAULT_COMMAND='cd ~/home_config && git pull && git submodule update --init --recursive && hm-switch && hm-switch --gc'
 
 usage() {
     echo "usage: update-all-hosts [--host NAME]... [--off-lan] [-- <command>]" >&2
@@ -139,6 +147,11 @@ reason() {  # reason <log>
         echo "host key verification failed - check the key yourself; known_hosts is not touched"
     elif grep -q 'Permission denied (' "$1"; then
         echo "ssh authentication refused"
+    elif sub=$(sed -n "s/.*Unable to checkout '.*' in submodule path '\(.*\)'.*/\1/p" "$1" | head -n 1) &&
+         [ -n "$sub" ]; then
+        echo "git submodule update: local changes in $sub - nothing stashed"
+    elif grep -q 'in submodule path' "$1"; then
+        echo "git submodule update: $(grep -m 1 'in submodule path' "$1")"
     elif grep -q 'Your local changes to the following files would be overwritten' "$1" ||
          grep -q 'untracked working tree files would be overwritten' "$1"; then
         echo "git pull: dirty working tree - nothing stashed"
