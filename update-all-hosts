@@ -17,12 +17,11 @@
 # THERE IS NO REMOTE DEPLOY. Each host pulls and switches itself, so this is
 # ssh plus bookkeeping. The host you run it on is run directly rather than over
 # ssh; it is recognised by `$USER@$(uname -n)`, the same identity hm-switch
-# resolves its flake attribute from (nix/hm-switch.nix). A VPS hostname is
-# whatever the provider assigned, so that table is repeated below - add a row
-# to both when a host is added.
+# resolves its flake attribute from (nix/hm-switch.nix).
 #
-# THE HOST LIST IS nix/hosts/, not this file: one host per *.nix there. Only
-# hosts whose ssh alias differs from the file name need an entry in alias().
+# THE HOST LIST IS nix/hosts/, not this file: one host per *.nix there. The
+# ssh aliases and the local-identity table live in lib/home-config-hosts.sh,
+# shared with gpg-unlock-all.
 #
 # THE COMMAND GOES OVER STDIN to `bash -l -s`, not as an argument to `bash
 # -lc`. A login shell is needed because hm-switch lives in ~/.nix-profile/bin,
@@ -54,6 +53,10 @@
 
 set -u
 
+# Through the ~/.local/bin symlink to the checkout, where lib/ sits beside us.
+# shellcheck source=lib/home-config-hosts.sh
+. "$(dirname "$(readlink -f "$0")")/lib/home-config-hosts.sh"
+
 REPO=${UPDATE_ALL_HOSTS_REPO:-$HOME/home_config}
 LOGS=${UPDATE_ALL_HOSTS_LOGS:-${XDG_STATE_HOME:-$HOME/.local/state}/update-all-hosts}
 SSH=${UPDATE_ALL_HOSTS_SSH:-ssh}
@@ -84,38 +87,8 @@ while [ $# -gt 0 ]; do
     shift
 done
 
-# The ssh alias for a nix/hosts/ name, where the two differ.
-alias_for() {
-    case "$1" in
-        openta) echo openta-vps ;;
-        berlix) if [ "$off_lan" -eq 1 ]; then echo berlix-ts; else echo berlix; fi ;;
-        *) echo "$1" ;;
-    esac
-}
-
-# The nix/hosts/ name of the machine this runs on, or nothing. Mirrors hostMap
-# in nix/hm-switch.nix.
-local_host() {
-    case "$IDENTITY" in
-        nelson@asterix)        echo asterix ;;
-        nelson@berlix)         echo berlix ;;
-        nelson@gudrun)         echo gudrun ;;
-        nelson@gudrun-wsl)     echo gudrun-wsl ;;
-        nloyola@opentaproject) echo openta ;;
-        nloyola@ms-ubuntu-1)   echo stellan-vps ;;
-        nloyola@srv899874)     echo replica-vps ;;
-        tikitak@srv985437)     echo tikitak-vps ;;
-    esac
-}
-
-[ -d "$REPO/nix/hosts" ] || die "no host list at $REPO/nix/hosts"
-
-hosts=
-for f in "$REPO"/nix/hosts/*.nix; do
-    [ -e "$f" ] || continue
-    hosts="$hosts $(basename "$f" .nix)"
-done
-[ -n "$hosts" ] || die "no hosts in $REPO/nix/hosts"
+hosts=$(hc_hosts "$REPO") || die "no hosts in $REPO/nix/hosts"
+hosts=" $(printf '%s' "$hosts" | tr '\n' ' ')"
 
 if [ -n "$only" ]; then
     for h in $only; do
@@ -131,7 +104,7 @@ run=$LOGS/$(date +%Y%m%d-%H%M%S)
 mkdir -p "$run" || die "cannot create $run"
 ln -sfn "$(basename "$run")" "$LOGS/latest"
 
-me=$(local_host)
+me=$(hc_local_host "$IDENTITY")
 # One brace group, so bash has parsed all of it before anything runs. Then the
 # exec takes stdin away from the command, which would otherwise be reading the
 # rest of this script.
@@ -176,7 +149,7 @@ update() {  # update <host>
     else
         printf '%s\n' "$script" | "$SSH" -o BatchMode=yes -o ConnectTimeout=15 \
             -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
-            "$(alias_for "$h")" 'bash -l -s' >"$log" 2>&1
+            "$(hc_alias "$h" "$off_lan")" 'bash -l -s' >"$log" 2>&1
         rc=$?
     fi
 
