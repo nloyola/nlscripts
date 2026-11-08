@@ -1,0 +1,173 @@
+#!/usr/bin/env bash
+# Unlock the GPG keys on every other home_config host from one prompt.
+#
+#   gpg-unlock-all [--host NAME]... [--off-lan]
+#       Ask for the GPG passphrase once, then run `gpg-unlock --stdin` on every
+#       host in home_config's nix/hosts/ except this one, all at once, and
+#       finish with one line per host.
+#       --host limits the run to the named hosts (repeatable). --off-lan
+#       reaches berlix through its tailnet alias instead of the LAN one.
+#
+# WHY. A host's gpg-agent forgets the passphrase whenever it restarts, which in
+# practice means a reboot. Until someone runs gpg-unlock there, git over SSH
+# from that host works only through an agent forwarded from a machine that is
+# awake - so a Claude session on stellan-vps could not push while asterix was
+# suspended. This replaces `ssh -t <host> gpg-unlock` once per host.
+#
+# THE PASSPHRASE GOES OVER SSH'S STDIN, never argv (visible in ps), the
+# environment, a file or a log. It is read with echo off from the terminal, or
+# as one line from stdin when stdin is not a terminal (`... | gpg-unlock-all`).
+# Each host's gpg-unlock checks it against that host's own key before caching
+# anything, so a typo is reported as "wrong passphrase" everywhere and leaves
+# every agent as it was.
+#
+# This machine is skipped: its own agent is unlocked by logging in (pam_gnupg)
+# or by plain gpg-unlock, and asking it would prove nothing - an agent that
+# already holds the passphrase accepts any other.
+#
+# Per host, from gpg-unlock's exit status:
+#   unlocked         the passphrase is now cached
+#   already          the agent already held it; nothing was sent to it
+#   no-key           the host holds no secret for those keys (exit 3)
+#   wrong            the passphrase was rejected; nothing cached (exit 4)
+#   missing          the host has no gpg-unlock --stdin yet - run update-all-hosts
+#   unreachable      ssh itself failed
+#   failed           anything else, with gpg-unlock's last line
+# Exit 0 every host unlocked/already/no-key, 1 a host failed or rejected the
+# passphrase, 2 a host could not be reached (as in update-all-hosts, not knowing
+# outranks a known failure).
+#
+# GPG_UNLOCK_ALL_REPO relocates the home_config checkout, GPG_UNLOCK_ALL_SSH
+# the ssh binary and GPG_UNLOCK_ALL_IDENTITY the local `$USER@$(uname -n)`.
+# They exist for the test suite, scripts/tests/gpg-unlock-all-test.sh in
+# home_config.
+
+set -u
+
+# Through the ~/.local/bin symlink to the checkout, where lib/ sits beside us.
+# shellcheck source=lib/home-config-hosts.sh
+. "$(dirname "$(readlink -f "$0")")/lib/home-config-hosts.sh"
+
+REPO=${GPG_UNLOCK_ALL_REPO:-$HOME/home_config}
+SSH=${GPG_UNLOCK_ALL_SSH:-ssh}
+IDENTITY=${GPG_UNLOCK_ALL_IDENTITY:-${USER:-$(id -un)}@$(uname -n)}
+
+# A login shell for the Home Manager PATH, as in update-all-hosts; the command
+# is an argument here because stdin is carrying the passphrase.
+# shellcheck disable=SC2016  # expanded by the remote bash, not here
+REMOTE='export PATH="$HOME/.nix-profile/bin:$PATH"; exec gpg-unlock --stdin'
+
+usage() {
+    echo "usage: gpg-unlock-all [--host NAME]... [--off-lan]" >&2
+    exit 2
+}
+
+die() { echo "gpg-unlock-all: $*" >&2; exit 2; }
+
+off_lan=0
+only=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --host) [ $# -ge 2 ] || usage; only+=("$2"); shift ;;
+        --host=*) only+=("${1#--host=}") ;;
+        --off-lan) off_lan=1 ;;
+        *) usage ;;
+    esac
+    shift
+done
+
+mapfile -t known < <(hc_hosts "$REPO") || true
+[ "${#known[@]}" -gt 0 ] || die "no hosts in $REPO/nix/hosts"
+
+if [ "${#only[@]}" -gt 0 ]; then
+    for h in "${only[@]}"; do
+        case " ${known[*]} " in
+            *" $h "*) ;;
+            *) die "unknown host '$h' (known: ${known[*]})" ;;
+        esac
+    done
+    candidates=("${only[@]}")
+else
+    candidates=("${known[@]}")
+fi
+
+me=$(hc_local_host "$IDENTITY")
+hosts=()
+for h in "${candidates[@]}"; do
+    [ "$h" = "$me" ] || hosts+=("$h")
+done
+[ "${#hosts[@]}" -gt 0 ] || die "no hosts to unlock (${me:-this machine} is skipped)"
+
+if [ -t 0 ]; then
+    printf 'GPG passphrase: ' >&2
+    IFS= read -rs pass || { echo >&2; die "aborted"; }
+    echo >&2
+else
+    IFS= read -r pass || [ -n "${pass-}" ] || die "no passphrase on stdin"
+fi
+[ -n "$pass" ] || die "empty passphrase"
+
+work=$(mktemp -d) || die "cannot create a scratch directory"
+trap 'rm -rf "$work"' EXIT
+trap 'exit 130' INT TERM
+
+# Unlock one host and leave its verdict in <host>.status: "<word> [reason]".
+unlock() {  # unlock <host>
+    local h=$1 log=$work/$1.log rc verdict last
+    printf '%s\n' "$pass" | "$SSH" -o BatchMode=yes -o ConnectTimeout=15 \
+        "$(hc_alias "$h" "$off_lan")" "bash -l -c '$REMOTE'" >"$log" 2>&1
+    rc=$?
+    last=$(grep -v '^[[:space:]]*$' "$log" | tail -n 1)
+    case "$rc" in
+        0)  if grep -q 'already usable' "$log"; then verdict=already
+            else verdict=unlocked; fi ;;
+        3)  verdict=no-key ;;
+        4)  verdict=wrong ;;
+        127) verdict="missing gpg-unlock not found - run update-all-hosts" ;;
+        255) if grep -q 'Host key verification failed' "$log"; then
+                 verdict="failed host key verification failed - check the key yourself"
+             elif grep -q 'Permission denied (' "$log"; then
+                 verdict="failed ssh authentication refused"
+             else
+                 verdict="unreachable ${last:-no output}"
+             fi ;;
+        # The gpg-unlock before --stdin ignores the flag: a locked host then
+        # refuses the non-terminal stdin, a newer one rejects a bad flag.
+        *)  if grep -q 'usage: gpg-unlock\|stdin is not a terminal' "$log"; then
+                verdict="missing gpg-unlock has no --stdin - run update-all-hosts"
+            else
+                verdict="failed ${last:-exit $rc}"
+            fi ;;
+    esac
+    echo "$verdict" >"$work/$h.status"
+}
+
+echo "unlocking: ${hosts[*]}"
+[ -n "$me" ] && echo "($me is this machine, skipped)"
+for h in "${hosts[@]}"; do
+    unlock "$h" &
+done
+wait
+unset pass
+
+echo
+status=0
+wrong=0
+for h in "${hosts[@]}"; do
+    verdict=$(cat "$work/$h.status" 2>/dev/null || echo "failed no verdict recorded")
+    word=${verdict%% *}
+    why=
+    [ "$word" = "$verdict" ] || why=${verdict#* }
+    printf '%-12s %-12s %s\n' "$h" "$word" "$why" | sed 's/[[:space:]]*$//'
+    case "$word" in
+        unreachable) status=2 ;;
+        wrong) wrong=$((wrong + 1)); [ "$status" -eq 2 ] || status=1 ;;
+        failed|missing) [ "$status" -eq 2 ] || status=1 ;;
+    esac
+done
+
+if [ "$wrong" -gt 0 ]; then
+    echo
+    echo "$wrong host(s) rejected the passphrase; nothing was cached there."
+fi
+exit "$status"
