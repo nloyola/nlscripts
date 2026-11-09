@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Copy the Nordita DB backups from the Syncthing sender (srv02) to berlix,
+# relayed through the host this runs on: berlix is not reachable from srv02.
+#
+#   srv02:/opt/syncthing/Sync/backup/db/  ->  <this host>:~/backups/db/nordita/
+#                                         ->  berlix:/home/nelson/backups/db/nordita/
+#
+# Runs from any workstation that can reach srv02, which in practice means one
+# with the SU VPN up (asterix, gudrun). Each relay host keeps its own staging
+# copy, so the hosts do not need to agree on what they have already fetched.
+#
+# No --delete on either hop: berlix holds older dumps and extra folders
+# (combodb2020, db_caa) that are not on srv02 and must be kept.
+#
+# Usage: nordita-db-backup-sync [-n]    (-n = dry run)
+
+set -euo pipefail
+
+SRC_HOST=nordita-syncthing
+SRC_DIR=/opt/syncthing/Sync/backup/db/
+STAGE_DIR="$HOME/backups/db/nordita/"
+DEST_HOST=berlix
+DEST_DIR=/home/nelson/backups/db/nordita/
+
+if [ "$(hostname)" = "$DEST_HOST" ]; then
+    echo "STOP: run this from a workstation, not from $DEST_HOST (the destination)" >&2
+    exit 1
+fi
+
+dry_run=()
+if [ "${1:-}" = -n ]; then
+    dry_run=(--dry-run)
+fi
+
+if ! ssh -o BatchMode=yes -o ConnectTimeout=10 "$SRC_HOST" true 2>/dev/null; then
+    echo "STOP: cannot reach or log in to $SRC_HOST - is the SU VPN up?" >&2
+    exit 1
+fi
+
+echo "==> $SRC_HOST:$SRC_DIR -> $STAGE_DIR"
+mkdir -p "$STAGE_DIR"
+rsync -avh --partial "${dry_run[@]}" \
+    --rsync-path='sudo -n -u syncthing rsync' \
+    "$SRC_HOST:$SRC_DIR" "$STAGE_DIR"
+
+echo "==> $STAGE_DIR -> $DEST_HOST:$DEST_DIR"
+# shellcheck disable=SC2029  # expanding DEST_DIR locally is intended
+ssh "$DEST_HOST" "mkdir -p '$DEST_DIR'"
+rsync -avh --partial "${dry_run[@]}" "$STAGE_DIR" "$DEST_HOST:$DEST_DIR"
